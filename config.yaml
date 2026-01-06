@@ -1,0 +1,21 @@
+experiment:
+  name: "Hybrid_XFeat_DeepBit_Student"
+  version: "v1.0"
+
+model:
+  backbone:"mobile_shufflenet"
+  descriptor_dim: 64
+  binary_bits: 256
+  use_hashing: deepbit
+  use_distillation: true
+  use_qat: true
+
+training:
+  batch_size: 8         
+  learning_rate: 0.001
+  epochs: 50
+  distillation_loss_weight: 0.5
+  quantization_loss_weight: 0.1
+  image_size: [640, 480]
+  num_keypoints: 1000  # Total across pyramid levels
+  pyramid_levels: 8

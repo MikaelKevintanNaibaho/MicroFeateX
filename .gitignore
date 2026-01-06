@@ -1,0 +1,24 @@
+# --- Data & Datasets ---
+data/
+
+# --- Python Cache & Compiled Files ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Model Checkpoints & Exports ---
+# Ignore the checkpoints folder and any model weight files
+checkpoints/
+*.pth
+*.pt
+*.onnx
+
+# --- System & IDE ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- Logs ---
+*.log
