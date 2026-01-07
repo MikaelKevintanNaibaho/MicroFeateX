@@ -1,20 +1,17 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class SuperPointTeacher(nn.Module):
     """
     Wrapper for the standard SuperPoint model to serve as a frozen teacher.
-    Expects standard 'superpoint_v1.pth' weights.
     """
 
     def __init__(self, weights_path="data/superpoint_v1.pth", device="cuda"):
         super().__init__()
         self.device = device
 
-        # Define the standard SuperPoint architecture
-        # (This matches the official Magicleap implementation structure)
+        # Define standard SuperPoint architecture
         self.relu = nn.ReLU(inplace=True)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
@@ -40,7 +37,14 @@ class SuperPointTeacher(nn.Module):
         self.convDb = nn.Conv2d(c5, d1, kernel_size=1, stride=1, padding=0)
 
         # Load weights
-        self.load_state_dict(torch.load(weights_path), strict=True)
+        try:
+            self.load_state_dict(torch.load(weights_path), strict=True)
+            print(f"Loaded Teacher weights from {weights_path}")
+        except FileNotFoundError:
+            print(
+                f"WARNING: Teacher weights not found at {weights_path}. Please download superpoint_v1.pth"
+            )
+
         self.to(device)
         self.eval()  # Always freeze the teacher!
 
@@ -52,7 +56,7 @@ class SuperPointTeacher(nn.Module):
         Input: Grayscale Image [B, 1, H, W]
         Output:
             - descriptors: [B, 256, H/8, W/8] (Dense Map)
-            - semi_dense_scores: [B, 65, H/8, W/8] (Raw logits for heatmap)
+            - semi_dense_scores: [B, 65, H/8, W/8] (Raw logits)
         """
         # Encoder
         x = self.relu(self.conv1a(x))
@@ -71,10 +75,10 @@ class SuperPointTeacher(nn.Module):
         # Descriptor (Dense 256-dim map)
         cDa = self.relu(self.convDa(x))
         descriptors = self.convDb(cDa)
-        dn = torch.norm(descriptors, p=2, dim=1, keepdim=True)  # Normalize
+        dn = torch.norm(descriptors, p=2, dim=1, keepdim=True)
         descriptors = descriptors / (dn + 1e-6)
 
-        # Detector (Logits for 8x8 cell + dustbin)
+        # Detector
         cPa = self.relu(self.convPa(x))
         semi_dense_scores = self.convPb(cPa)
 

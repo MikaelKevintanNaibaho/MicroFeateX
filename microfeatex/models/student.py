@@ -2,12 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
-from torch.quantization import QuantStub, DeQuantStub
 
 
 class DepthwiseSeparableConv(nn.Module):
     """
-    splits spatial and channel mixing for speed
+    Splits spatial and channel mixing for efficiency.
     """
 
     def __init__(self, in_c, out_c, stride=1):
@@ -25,7 +24,7 @@ class DepthwiseSeparableConv(nn.Module):
 
 class DeepBitHash(nn.Module):
     """
-    DeepBit layer with Stright-Through Estimator (STE) for training.
+    DeepBit layer with Straight-Through Estimator (STE) for training.
     """
 
     def __init__(self, in_dim, out_bits=256):
@@ -52,8 +51,7 @@ class EfficientFeatureExtractor(nn.Module):
         mobilenet = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
 
         # 2. Modify First Layer for Grayscale (Efficiency Hack)
-        # We sum the weights of the RGB filters to make a 1-channel filter.
-        # This is faster than x.repeat(1, 3, 1, 1) every frame.
+        # Sum weights of RGB filters to create a 1-channel filter
         original_first_layer = mobilenet.features[0][0]
         new_first_layer = nn.Conv2d(
             1, 16, kernel_size=3, stride=2, padding=1, bias=False
@@ -69,13 +67,12 @@ class EfficientFeatureExtractor(nn.Module):
             mobilenet.features[0][1],  # BN
             mobilenet.features[0][2],  # HardSwish
             mobilenet.features[1],  # /2 Depthwise (Total /4)
-            # Use Depthwise Separable for your custom layers (XFeat style)
+            # Custom layers (XFeat style)
             DepthwiseSeparableConv(16, 32, stride=2),  # /8 resolution
             DepthwiseSeparableConv(32, 64, stride=1),
         )
 
         # 4. Detector Head (Pixel-wise Keypoint Heatmap)
-        # Operates on the /8 feature map.
         self.detector_head = nn.Sequential(
             nn.Conv2d(64, 32, kernel_size=1),
             nn.ReLU(),
@@ -84,35 +81,31 @@ class EfficientFeatureExtractor(nn.Module):
         )
 
         # 5. Descriptor Head (Dense Local Descriptors)
-        # NO Global Pooling! We need a grid of descriptors.
         self.descriptor_head = nn.Sequential(
             DepthwiseSeparableConv(64, descriptor_dim, stride=1),
-            # Output shape: [B, descriptor_dim, H/8, W/8]
         )
 
         # 6. Hashing Head
         self.hashing = DeepBitHash(descriptor_dim, binary_bits)
+
         # Distillation Adapter
-        # Only used during training to match Teacher's 256-dim output
+        # Projects student dim (64) to Teacher dim (256) for loss calculation
         self.adapter = nn.Conv2d(descriptor_dim, 256, kernel_size=1)
 
     def forward(self, x):
         # x is grayscale [B, 1, H, W]
-
         features = self.backbone(x)
 
-        # 1. Heatmap for Keypoint Detection
+        # 1. Heatmap
         heatmap = self.detector_head(features)
 
-        # 2. Dense Descriptors for Tracking
+        # 2. Dense Descriptors
         desc_raw = self.descriptor_head(features)
 
         # L2 Normalize before hashing (crucial for stability)
         desc_raw = F.normalize(desc_raw, p=2, dim=1)
 
-        # 3. Binary Descriptors
-        # Shape: [B, binary_bits, H/8, W/8]
-        # Each spatial location has its own binary code!
+        # 3. Binary Descriptors (DeepBit)
         binary_desc = self.hashing(desc_raw)
 
         teacher_aligned_desc = None
