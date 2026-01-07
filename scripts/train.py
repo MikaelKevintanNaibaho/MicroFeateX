@@ -40,9 +40,17 @@ def main():
     print(f"Initializing {config['experiment']['name']} on {device}")
 
     # 2. Dataset & DataLoader
-    dataset = Dataset(config["paths"]["coco_root"], config)
-    loader = DataLoader(
-        dataset,
+    full_dataset = Dataset(config["paths"]["coco_root"], config)
+    train_size = int(0.9 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=config["training"]["batch_size"],
         shuffle=True,
         num_workers=config["system"]["num_workers"],
@@ -50,6 +58,14 @@ def main():
         drop_last=True,
     )
 
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config["training"]["batch_size"],  # Can be larger if VRAM allows
+        shuffle=False,  # Don't shuffle validation
+        num_workers=config["system"]["num_workers"],
+        pin_memory=True,
+        drop_last=False,
+    )
     # 3. Models
     print("Building models...")
     student = EfficientFeatureExtractor(
@@ -63,12 +79,20 @@ def main():
     augmenter = AugmentationPipe(config, device).to(device)
 
     # 5. Trainer
-    trainer = Trainer(student, teacher, loader, config, augmenter)
+    trainer = Trainer(student, teacher, train_loader, val_loader, config, augmenter)
 
     # 6. Resume if needed
-    if config["paths"]["resume_path"]:
-        trainer.load_checkpoint(config["paths"]["resume_path"])
+    resume_path = config["paths"]["resume_path"]
+    if resume_path:
+        # Construct full path if it's relative
+        if not os.path.isabs(resume_path):
+            resume_path = os.path.join(project_root, resume_path)
 
+        if os.path.exists(resume_path):
+            trainer.load_checkpoint(resume_path)
+        else:
+            print(f"WARNING: Checkpoint not found at {resume_path}")
+            print("Starting fresh training session...")
     # 7. Start
     trainer.train_loop()
 

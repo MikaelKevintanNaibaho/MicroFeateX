@@ -108,10 +108,8 @@ class EfficientFeatureExtractor(nn.Module):
         # 3. Binary Descriptors (DeepBit)
         binary_desc = self.hashing(desc_raw)
 
-        teacher_aligned_desc = None
-        if self.training:
-            teacher_aligned_desc = self.adapter(desc_raw)
-            # Normalize again after projection
-            teacher_aligned_desc = F.normalize(teacher_aligned_desc, p=2, dim=1)
+        teacher_aligned_desc = self.adapter(desc_raw)
+        # Normalize again after projection
+        teacher_aligned_desc = F.normalize(teacher_aligned_desc, p=2, dim=1)
 
         return heatmap, binary_desc, teacher_aligned_desc

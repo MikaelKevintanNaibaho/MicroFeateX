@@ -10,10 +10,11 @@ from microfeatex.utils.losses import compute_total_loss
 
 
 class Trainer:
-    def __init__(self, student, teacher, train_loader, config, augmenter):
+    def __init__(self, student, teacher, train_loader, val_loader, config, augmenter):
         self.student = student
         self.teacher = teacher
-        self.loader = train_loader
+        self.train_loader = train_loader
+        self.val_loader = val_loader
         self.config = config
         self.augmenter = augmenter
         self.device = config["system"]["device"]
@@ -526,10 +527,10 @@ class Trainer:
         try:
             for epoch in range(self.start_epoch, self.config["training"]["epochs"]):
                 epoch_loss = 0.0
-                progress = tqdm(self.loader, desc=f"Epoch {epoch}")
+                progress = tqdm(self.train_loader, desc=f"Epoch {epoch}")
 
                 for i, batch_img1 in enumerate(progress):
-                    step = epoch * len(self.loader) + i
+                    step = epoch * len(self.train_loader) + i
 
                     # 1. Move to GPU
                     batch_img1 = batch_img1.to(self.device)
@@ -569,6 +570,9 @@ class Trainer:
                         self.writer.add_scalar(
                             "Loss/Distill", loss_dict["distill"].item(), step
                         )
+                        self.writer.add_scalar(
+                            "Loss/Heatmap", loss_dict["heatmap"].item(), step
+                        )
 
                     # 8. Visualization Logging
                     if step % image_log_interval == 0:
@@ -603,14 +607,23 @@ class Trainer:
                             teacher_heatmap,
                         )
 
-                avg_loss = epoch_loss / len(self.loader)
-                print(f"Epoch {epoch} complete. Avg Loss: {avg_loss:.4f}")
+                avg_train_loss = epoch_loss / len(self.train_loader)
+                print(f"Epoch {epoch} complete. Avg Loss: {avg_train_loss:.4f}")
 
-                # Checkpointing
-                is_best = avg_loss < self.best_loss
+                avg_val_loss = self.validate()
+                print(f"Epoch {epoch} Val Loss: {avg_val_loss:.4f}")
+
+                # Log to TensorBoard
+                self.writer.add_scalar("Loss/Train_Epoch", avg_train_loss, epoch)
+                self.writer.add_scalar("Loss/Val_Epoch", avg_val_loss, epoch)
+
+                # Checkpointing (Use VAL loss for best model)
+                is_best = avg_val_loss < self.best_loss
                 if is_best:
-                    self.best_loss = avg_loss
-                self.save_checkpoint(epoch, avg_loss, is_best)
+                    print(f"New Best Model! (Val Loss: {avg_val_loss:.4f})")
+                    self.best_loss = avg_val_loss
+
+                self.save_checkpoint(epoch, avg_val_loss, is_best)
 
         except KeyboardInterrupt:
             print("\nTraining interrupted! Saving emergency checkpoint...")
@@ -618,3 +631,41 @@ class Trainer:
             print("Saved.")
 
         self.writer.close()
+
+    def validate(self):
+        """
+        Runs validation loop on unseen data.
+        """
+        print("Running Validation...")
+        self.student.eval()
+        self.teacher.eval()
+        self.augmenter.eval()  # Disable photometric noise for consistency
+
+        total_val_loss = 0.0
+
+        with torch.no_grad():
+            for batch_img1 in tqdm(self.val_loader, desc="Validating"):
+                batch_img1 = batch_img1.to(self.device)
+
+                # Use same augmentations to generate pairs, but without random noise
+                img1, img2, H_mat, mask = self.augmenter(batch_img1)
+
+                # Forward Pass
+                outs1 = self.student(img1)
+                outs2 = self.student(img2)
+                teacher_out = self.teacher(img1)
+
+                # Calculate Loss
+                loss_dict = compute_total_loss(
+                    outs1, outs2, teacher_out, H_mat, mask, self.config
+                )
+
+                total_val_loss += loss_dict["total"].item()
+
+        avg_val_loss = total_val_loss / len(self.val_loader)
+
+        # Switch back to training mode
+        self.student.train()
+        self.augmenter.train()
+
+        return avg_val_loss
