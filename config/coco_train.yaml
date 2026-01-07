@@ -23,7 +23,7 @@ model:
 training:
   batch_size: 8  # Adjust based on VRAM
   epochs: 50
-  lr: 0.0001
+  lr: 0.001
   save_interval: 1
   log_interval: 10
   image_log_interval: 100   # Update all images every 100 steps
@@ -38,4 +38,11 @@ augmentation:
   geometric: true                # Enable geometric transformations
   use_tps: false                 # Enable TPS warps (set to true for non-rigid)
   tps_prob: 0.5                  # Probability of applying TPS when enabled
-  difficulty: 0.3                # Transformation strength (0.1-0.5)
+  difficulty: 0.5                # Transformation strength (0.1-0.5)
+
+distill_mode: "triplet"  # Options: "cosine" (stable) or "triplet" (harder)
+loss_weights:
+    heatmap: 100.0   # High weight to force learning of small keypoints
+    distill: 1.0      # Teacher imitation
+    siamese: 2.0      # Viewpoint invariance
+    quant: 0.1        # Binary constraint

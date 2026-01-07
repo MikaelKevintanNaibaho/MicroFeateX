@@ -24,7 +24,7 @@ class DepthwiseSeparableConv(nn.Module):
 
 class DeepBitHash(nn.Module):
     """
-    DeepBit layer with Straight-Through Estimator (STE) for training.
+    DeepBit layer with Straight-Through Estimator (STE).
     """
 
     def __init__(self, in_dim, out_bits=256):
@@ -33,14 +33,12 @@ class DeepBitHash(nn.Module):
         self.tanh = nn.Tanh()
 
     def forward(self, x):
-        # x shape: [Batch, Channels, Height, Width]
         x = self.proj(x)
-        x = self.tanh(x)  # Range [-1, 1]
-
+        x = self.tanh(x)
         if self.training:
-            return x  # Return float for backprop
+            return x
         else:
-            return torch.sign(x)  # Return binary {-1, 1} for inference
+            return torch.sign(x)
 
 
 class EfficientFeatureExtractor(nn.Module):
@@ -50,8 +48,7 @@ class EfficientFeatureExtractor(nn.Module):
         # 1. Load Pretrained Weights
         mobilenet = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
 
-        # 2. Modify First Layer for Grayscale (Efficiency Hack)
-        # Sum weights of RGB filters to create a 1-channel filter
+        # 2. Modify First Layer for Grayscale
         original_first_layer = mobilenet.features[0][0]
         new_first_layer = nn.Conv2d(
             1, 16, kernel_size=3, stride=2, padding=1, bias=False
@@ -61,26 +58,26 @@ class EfficientFeatureExtractor(nn.Module):
                 dim=1, keepdim=True
             )
 
-        # 3. Backbone (Stride 2 -> Stride 4 -> Stride 8)
+        # 3. Backbone
         self.backbone = nn.Sequential(
-            new_first_layer,  # /2 resolution
+            new_first_layer,  # /2
             mobilenet.features[0][1],  # BN
             mobilenet.features[0][2],  # HardSwish
-            mobilenet.features[1],  # /2 Depthwise (Total /4)
-            # Custom layers (XFeat style)
+            mobilenet.features[1],  # /2 (Total /4)
             DepthwiseSeparableConv(16, 32, stride=2),  # /8 resolution
             DepthwiseSeparableConv(32, 64, stride=1),
         )
 
-        # 4. Detector Head (Pixel-wise Keypoint Heatmap)
+        # --- UPGRADE: High-Res PixelShuffle Head ---
+        # Instead of 1 channel, we predict 65 channels (8x8 grid + 1 dustbin)
         self.detector_head = nn.Sequential(
-            nn.Conv2d(64, 32, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 1, kernel_size=1),
-            nn.Sigmoid(),
+            nn.Conv2d(64, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 65, kernel_size=1),  # 64 corners + 1 dustbin
         )
 
-        # 5. Descriptor Head (Dense Local Descriptors)
+        # 5. Descriptor Head
         self.descriptor_head = nn.Sequential(
             DepthwiseSeparableConv(64, descriptor_dim, stride=1),
         )
@@ -89,27 +86,32 @@ class EfficientFeatureExtractor(nn.Module):
         self.hashing = DeepBitHash(descriptor_dim, binary_bits)
 
         # Distillation Adapter
-        # Projects student dim (64) to Teacher dim (256) for loss calculation
         self.adapter = nn.Conv2d(descriptor_dim, 256, kernel_size=1)
 
     def forward(self, x):
-        # x is grayscale [B, 1, H, W]
         features = self.backbone(x)
 
-        # 1. Heatmap
-        heatmap = self.detector_head(features)
+        # --- UPGRADE: High-Res Heatmap Logic ---
+        # 1. Get Logits [B, 65, H/8, W/8]
+        logits = self.detector_head(features)
 
-        # 2. Dense Descriptors
+        # 2. Softmax to get probabilities
+        probs = F.softmax(logits, dim=1)
+
+        # 3. Drop dustbin channel (last one) -> [B, 64, H/8, W/8]
+        corners = probs[:, :-1, :, :]
+
+        # 4. Pixel Shuffle to full resolution -> [B, 1, H, W]
+        heatmap = F.pixel_shuffle(corners, 8)
+
+        # ---------------------------------------
+
+        # Descriptors
         desc_raw = self.descriptor_head(features)
-
-        # L2 Normalize before hashing (crucial for stability)
         desc_raw = F.normalize(desc_raw, p=2, dim=1)
-
-        # 3. Binary Descriptors (DeepBit)
         binary_desc = self.hashing(desc_raw)
 
         teacher_aligned_desc = self.adapter(desc_raw)
-        # Normalize again after projection
         teacher_aligned_desc = F.normalize(teacher_aligned_desc, p=2, dim=1)
 
         return heatmap, binary_desc, teacher_aligned_desc
