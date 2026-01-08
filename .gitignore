@@ -1,5 +1,5 @@
 # --- Data & Datasets ---
-data/
+dataset/
 
 # --- Python Cache & Compiled Files ---
 __pycache__/
