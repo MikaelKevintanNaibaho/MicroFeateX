@@ -86,6 +86,26 @@ class Trainer:
         if os.path.exists(args.config):
             with open(args.config, "r") as f:
                 self.config = yaml.safe_load(f)
+            print(f"Loaded configuration from {args.config}")
+        # This ensures the YAML file takes precedence over argparse defaults
+        if "training" in self.config:
+            train_conf = self.config["training"]
+
+            # 1. Batch Size
+            if "batch_size" in train_conf:
+                self.args.batch_size = train_conf["batch_size"]
+                print(f"Config Override: batch_size set to {self.args.batch_size}")
+
+            # 2. Learning Rate
+            if "lr" in train_conf:
+                self.args.lr = train_conf["lr"]
+                print(f"Config Override: lr set to {self.args.lr}")
+
+            # 3. Epochs / Steps (Optional but recommended)
+            # If you want to control training length via config
+            if "n_steps" in train_conf:
+                self.args.n_steps = train_conf["n_steps"]
+                print(f"Config Override: n_steps set to {self.args.n_steps}")
 
         # 2. Determine Dataset Path (Config > Args)
         coco_root = args.coco_root_path
@@ -235,12 +255,22 @@ class Trainer:
                         self.scaler.scale(total_loss).backward()
                         self.scaler.unscale_(self.opt)
                         torch.nn.utils.clip_grad_norm_(self.net.parameters(), 1.0)
+                        scale_before = self.scaler.get_scale()
                         self.scaler.step(self.opt)
                         self.scaler.update()
-                        self.scheduler.step()
+
+                        # If scale decreased, it means the step was skipped (NaNs/Infs found)
+                        # We must NOT step the scheduler in that case to avoid the warning.
+                        scale_after = self.scaler.get_scale()
+                        if scale_after >= scale_before:
+                            self.scheduler.step()
 
                         if i % 10 == 0:
+                            steps_per_epoch = len(self.data_loader)
+                            epoch = i // steps_per_epoch
+
                             pbar.set_description(
+                                f"Ep: {epoch} | "
                                 f"Loss: {total_loss.item():.3f} | "
                                 f"SP: {loss_sp.item():.3f} | "
                                 f"DS: {loss_ds.item():.3f} | "
