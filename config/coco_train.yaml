@@ -1,15 +1,14 @@
 experiment:
-  name: "microfeatex_COCO_Synthesis"
-  description: "Training with synthetic COCO warps (Homography + TPS)"
-  version: "v0.1"
+  name: "MicroFeatEX_Distill"
+  description: "Student (EfficientFeatureExtractor) with SuperPoint Teacher + Synthetic COCO"
+  version: "v1.0"
 
 paths:
-  coco_root: "data/coco_20k/"
+  coco_root: "dataset/coco_20k/"
   checkpoint_dir: "checkpoints/"
   log_dir: "logs/"
-  resume_path: null  # Set to "checkpoints/last.pth" to resume
-  superpoint_weights: "data/superpoint_v1.pth"
-  resume_path: "checkpoints/last.pth"
+  # Ensure you have the teacher weights here
+  superpoint_weights: "dataset/superpoint_v1.pth" 
 
 system:
   device: "cuda"
@@ -21,29 +20,23 @@ model:
   binary_bits: 256
   
 training:
-  batch_size: 8  # Adjust based on VRAM
+  batch_size: 8
   epochs: 50
-  lr: 0.001
-  save_interval: 1
-  log_interval: 10
-  image_log_interval: 100   # Update all images every 100 steps
-  save_interval: 5          # Save checkpoint every 5 epochs
-  vis_top_k: 500
-  distill_mode: "triplet"  # Options: "cosine" (stable) or "triplet" (harder)
+  lr: 0.0003     # 3e-4
+  save_interval: 500 # Steps
+  
   loss_weights:
-    heatmap: 10.0   # High weight to force learning of small keypoints
-    distill: 1.0      # Teacher imitation
-    siamese: 2.0      # Viewpoint invariance
-    quant: 0.1        # Binary constraint
+    heatmap: 10.0   # Weight for SuperPoint Dense Distillation (Focal Loss)
+    distill: 1.0    # Weight for Descriptor Matching (Dual Softmax)
+    # reliability: 1.0 (Hardcoded scaling in keypoint_loss)
 
 augmentation:
-  warp_resolution: [1200, 900]  # (W, H) - Internal processing size
-  out_resolution: [640, 480]     # (W, H) - Final output size
-  sides_crop: 0.2                # Crop 20% from each side
-  photometric: true              # Enable photometric augmentations
-  geometric: true                # Enable geometric transformations
-  use_tps: false                 # Enable TPS warps (set to true for non-rigid)
-  tps_prob: 0.5                  # Probability of applying TPS when enabled
-  difficulty: 0.3                # Transformation strength (0.1-0.5)
-
+  warp_resolution: [640, 480]  
+  out_resolution: [640, 480]   
+  sides_crop: 0.1              
+  photometric: true            
+  geometric: true              
+  use_tps: true                
+  tps_prob: 0.5                
+  difficulty: 0.3
 

@@ -95,19 +95,31 @@ class EfficientFeatureExtractor(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # 1. Detector Head (Needs spatial precision)
+        # 1. Detector Head (Heatmap) - Keeps 65 channels for cell-wise softmax
         self.detector_head = nn.Sequential(
             nn.Conv2d(64, 256, 3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(256, 65, 1),  # PixelShuffle input
+            nn.Conv2d(256, 65, 1),
         )
 
-        # 2. Descriptor Head (Needs semantic context)
-        # Making this deeper helps matching accuracy
+        # 2. Descriptor Head
         self.descriptor_head = nn.Sequential(
             DepthwiseSeparableConv(64, 128, stride=1),
             DepthwiseSeparableConv(128, descriptor_dim, stride=1),
         )
+
+        # --- NEW: Reliability Head (XFeat specific) ---
+        # Predicts how "matchable" a pixel is (0 to 1)
+        self.reliability_head = nn.Sequential(
+            DepthwiseSeparableConv(64, 32, stride=1), nn.Conv2d(32, 1, kernel_size=1)
+        )
+
+        # --- NEW: Offset Head (XFeat specific) ---
+        # Predicts sub-pixel shifts (dx, dy) to refine grid points
+        self.offset_head = nn.Sequential(
+            DepthwiseSeparableConv(64, 32, stride=1), nn.Conv2d(32, 2, kernel_size=1)
+        )
+
         # --- 3. Hashing Head (DeepBit) ---
         self.hashing = DeepBitHash(descriptor_dim, binary_bits)
 
@@ -137,8 +149,10 @@ class EfficientFeatureExtractor(nn.Module):
         desc_raw = self.descriptor_head(features)
 
         # L2 Normalize floating point descriptors (for training stability)
-        desc_raw = F.normalize(desc_raw, p=2, dim=1)
+        desc_norm = F.normalize(desc_raw, p=2, dim=1)
 
+        reliability = torch.sigmoid(self.reliability_head(features))  # [B, 1, H/8, W/8]
+        offsets = torch.tanh(self.offset_head(features))  # [B, 2, H/8, W/8
         # Generate Binary Code (tanh in train, sign in eval)
         binary_desc = self.hashing(desc_raw)
 
@@ -147,4 +161,9 @@ class EfficientFeatureExtractor(nn.Module):
         teacher_aligned_desc = self.adapter(desc_raw)
         teacher_aligned_desc = F.normalize(teacher_aligned_desc, p=2, dim=1)
 
-        return heatmap, binary_desc, teacher_aligned_desc
+        return {
+            "heatmap": heatmap,
+            "descriptors": desc_norm,
+            "reliability": reliability,
+            "offset": offsets,
+        }
