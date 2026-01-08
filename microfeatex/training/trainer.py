@@ -12,19 +12,13 @@ from torch import optim
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
-
-# Modern AMP imports
 from torch.amp import autocast, GradScaler
-
 import numpy as np
 
-# Project Imports
 from microfeatex.models.student import EfficientFeatureExtractor
 from microfeatex.models.teacher import SuperPointTeacher
 from microfeatex.data.augmentation import AugmentationPipe
 from microfeatex.data.dataset import Dataset
-
-# Relative imports
 from . import utils
 from . import losses
 
@@ -38,11 +32,12 @@ def parse_arguments():
         default="config/coco_train.yaml",
         help="Path to config file",
     )
+    # RENAMED: generic 'dataset_root' instead of 'coco_root_path'
     parser.add_argument(
-        "--coco_root_path",
+        "--dataset_root",
         type=str,
         default="dataset/coco_20k",
-        help="Path to the COCO dataset root directory.",
+        help="Path to the dataset root directory.",
     )
     parser.add_argument(
         "--ckpt_save_path",
@@ -72,9 +67,7 @@ def parse_arguments():
 
 class Trainer:
     """
-    Trainer for MicroFeatEX using XFeat-style training loop.
-    Focuses on Synthetic COCO Warps and SuperPoint Distillation.
-    Includes AMP (Mixed Precision) for memory efficiency.
+    Generic Trainer for MicroFeatEX.
     """
 
     def __init__(self, args):
@@ -87,32 +80,32 @@ class Trainer:
             with open(args.config, "r") as f:
                 self.config = yaml.safe_load(f)
             print(f"Loaded configuration from {args.config}")
-        # This ensures the YAML file takes precedence over argparse defaults
+
+        # Override args with config
         if "training" in self.config:
             train_conf = self.config["training"]
-
-            # 1. Batch Size
             if "batch_size" in train_conf:
                 self.args.batch_size = train_conf["batch_size"]
                 print(f"Config Override: batch_size set to {self.args.batch_size}")
-
-            # 2. Learning Rate
             if "lr" in train_conf:
                 self.args.lr = train_conf["lr"]
                 print(f"Config Override: lr set to {self.args.lr}")
-
-            # 3. Epochs / Steps (Optional but recommended)
-            # If you want to control training length via config
             if "n_steps" in train_conf:
                 self.args.n_steps = train_conf["n_steps"]
                 print(f"Config Override: n_steps set to {self.args.n_steps}")
 
-        # 2. Determine Dataset Path (Config > Args)
-        coco_root = args.coco_root_path
-        if self.config.get("paths", {}).get("coco_root"):
-            coco_root = self.config["paths"]["coco_root"]
+        # 2. Determine Dataset Path (Generic Logic)
+        # Priority: Config 'dataset_root' > Config 'coco_root' > Args 'dataset_root'
+        dataset_root = args.dataset_root
+        paths_conf = self.config.get("paths", {})
 
-        print(f"Dataset Root: {coco_root}")
+        if "dataset_root" in paths_conf:
+            dataset_root = paths_conf["dataset_root"]
+        elif "coco_root" in paths_conf:
+            # Fallback for old configs
+            dataset_root = paths_conf["coco_root"]
+
+        print(f"Dataset Root: {dataset_root}")
 
         # 3. Models
         self.net = EfficientFeatureExtractor(descriptor_dim=64, binary_bits=256).to(
@@ -120,30 +113,28 @@ class Trainer:
         )
 
         print(f"Loading SuperPoint Teacher...")
-        sp_weights = self.config.get("paths", {}).get(
-            "superpoint_weights", "dataset/superpoint_v1.pth"
-        )
+        sp_weights = paths_conf.get("superpoint_weights", "dataset/superpoint_v1.pth")
         self.teacher = SuperPointTeacher(weights_path=sp_weights, device=str(self.dev))
         self.teacher.eval()
 
         # 4. Optimization
         self.opt = optim.Adam(
-            filter(lambda x: x.requires_grad, self.net.parameters()), lr=args.lr
+            filter(lambda x: x.requires_grad, self.net.parameters()), lr=self.args.lr
         )
         self.scheduler = torch.optim.lr_scheduler.StepLR(
             self.opt, step_size=30000, gamma=0.5
         )
-
-        # 5. Initialize Scaler for AMP
         self.scaler = GradScaler("cuda")
 
-        # 6. Data & Augmentation
+        # 5. Data & Augmentation
         self.augmentor = AugmentationPipe(self.config, self.dev)
 
-        dataset = Dataset(coco_root, self.config)
+        # Initialize generic dataset
+        dataset = Dataset(dataset_root, self.config)
+
         self.data_loader = DataLoader(
             dataset,
-            batch_size=args.batch_size,
+            batch_size=self.args.batch_size,
             shuffle=True,
             num_workers=4,
             pin_memory=True,
@@ -151,7 +142,7 @@ class Trainer:
         )
         self.data_iter = iter(self.data_loader)
 
-        # 7. Logging & Config
+        # 6. Logging
         os.makedirs(args.ckpt_save_path, exist_ok=True)
         log_dir = os.path.join(args.ckpt_save_path, "logdir")
         os.makedirs(log_dir, exist_ok=True)
@@ -167,6 +158,8 @@ class Trainer:
         self.w_heatmap = loss_cfg.get("heatmap", 10.0)
         self.w_distill = loss_cfg.get("distill", 1.0)
         self.w_reliability = 1.0
+        # Default fine weight to 1.0 if not specified
+        self.w_fine = loss_cfg.get("fine", 1.0)
 
     def train(self):
         self.net.train()
@@ -183,17 +176,25 @@ class Trainer:
                     self.data_iter = iter(self.data_loader)
                     batch = next(self.data_iter)
 
-                # --- MOVED: Start Autocast BEFORE Augmentation to save memory ---
                 with autocast("cuda"):
-                    # 2. Augment (Now uses Float16 where possible)
+                    # 2. Augment
                     p1, p2, H1, H2 = utils.make_batch(self.augmentor, batch, difficulty)
 
                     # 3. Forward Pass (Student)
                     out1 = self.net(p1)
                     out2 = self.net(p2)
 
-                    hmap1, desc1 = out1["heatmap"], out1["descriptors"]
-                    hmap2, desc2 = out2["heatmap"], out2["descriptors"]
+                    # Extract heads
+                    hmap1, desc1, off1 = (
+                        out1["heatmap"],
+                        out1["descriptors"],
+                        out1["offset"],
+                    )
+                    hmap2, desc2, off2 = (
+                        out2["heatmap"],
+                        out2["descriptors"],
+                        out2["offset"],
+                    )
 
                     # 4. Forward Pass (Teacher)
                     with torch.no_grad():
@@ -205,16 +206,19 @@ class Trainer:
                     loss_sp2 = losses.superpoint_distill_loss(hmap2, t_out2["scores"])
                     loss_sp = (loss_sp1 + loss_sp2) / 2.0
 
-                    # 6. Compute Correspondences (No grads needed)
+                    # 6. Correspondences
                     h_coarse, w_coarse = p1.shape[-2] // 8, p1.shape[-1] // 8
                     negatives, positives = utils.get_corresponding_pts(
                         p1, p2, H1, H2, self.augmentor, h_coarse, w_coarse
                     )
 
-                    # 7. Sparse Loss Calculation
+                    # 7. Sparse Loss Loop
                     batch_loss_ds = 0
                     batch_loss_kp = 0
+                    batch_loss_fine = 0
                     batch_acc = 0
+                    batch_acc_fine = 0  # Accumulate fine accuracy
+                    batch_matches = 0
                     valid_batches = 0
 
                     for b in range(len(positives)):
@@ -223,44 +227,68 @@ class Trainer:
 
                         pts1, pts2 = positives[b][:, :2], positives[b][:, 2:]
 
+                        # --- Descriptor Loss ---
                         m1 = desc1[b, :, pts1[:, 1].long(), pts1[:, 0].long()].t()
                         m2 = desc2[b, :, pts2[:, 1].long(), pts2[:, 0].long()].t()
-
                         loss_ds, conf = losses.dual_softmax_loss(m1, m2, temp=0.1)
 
+                        # --- Reliability/Keypoint Loss ---
                         h1_pred = hmap1[b, 0, pts1[:, 1].long(), pts1[:, 0].long()]
                         h2_pred = hmap2[b, 0, pts2[:, 1].long(), pts2[:, 0].long()]
-
                         loss_kp = losses.keypoint_loss(
                             h1_pred, conf
                         ) + losses.keypoint_loss(h2_pred, conf)
 
+                        # --- Fine / Offset Loss & Accuracy ---
+                        # Sample predicted offsets
+                        off1_pred = off1[b, :, pts1[:, 1].long(), pts1[:, 0].long()].t()
+                        off2_pred = off2[b, :, pts2[:, 1].long(), pts2[:, 0].long()].t()
+
+                        # Targets: Real Float Coord - Cell Center
+                        off1_target = pts1 - (pts1.long().float() + 0.5)
+                        off2_target = pts2 - (pts2.long().float() + 0.5)
+
+                        loss_fine = F.l1_loss(off1_pred, off1_target) + F.l1_loss(
+                            off2_pred, off2_target
+                        )
+
+                        # Calculate Fine Accuracy (% with L1 error < 0.5 pixels)
+                        fine_diff = torch.abs(off1_pred - off1_target).sum(dim=1)
+                        acc_fine = (fine_diff < 0.5).float().mean()
+
                         batch_loss_ds += loss_ds
                         batch_loss_kp += loss_kp
+                        batch_loss_fine += loss_fine
                         batch_acc += utils.check_accuracy(m1, m2)
+                        batch_acc_fine += acc_fine
+                        batch_matches += len(positives[b])
                         valid_batches += 1
 
                     if valid_batches > 0:
+                        # Average over batch
                         loss_ds = batch_loss_ds / valid_batches
                         loss_kp = batch_loss_kp / valid_batches
+                        loss_fine = batch_loss_fine / valid_batches
                         acc = batch_acc / valid_batches
+                        acc_fine = batch_acc_fine / valid_batches
+                        avg_matches = batch_matches / valid_batches
 
                         total_loss = (
                             (self.w_distill * loss_ds)
                             + (self.w_reliability * loss_kp)
                             + (self.w_heatmap * loss_sp)
+                            + (self.w_fine * loss_fine)
                         )
 
                         self.opt.zero_grad()
                         self.scaler.scale(total_loss).backward()
                         self.scaler.unscale_(self.opt)
                         torch.nn.utils.clip_grad_norm_(self.net.parameters(), 1.0)
+
                         scale_before = self.scaler.get_scale()
                         self.scaler.step(self.opt)
                         self.scaler.update()
 
-                        # If scale decreased, it means the step was skipped (NaNs/Infs found)
-                        # We must NOT step the scheduler in that case to avoid the warning.
                         scale_after = self.scaler.get_scale()
                         if scale_after >= scale_before:
                             self.scheduler.step()
@@ -272,23 +300,40 @@ class Trainer:
                             pbar.set_description(
                                 f"Ep: {epoch} | "
                                 f"Loss: {total_loss.item():.3f} | "
-                                f"SP: {loss_sp.item():.3f} | "
-                                f"DS: {loss_ds.item():.3f} | "
-                                f"Acc: {acc:.3f}"
+                                f"Acc: {acc:.3f} | "
+                                f"Fine: {loss_fine.item():.3f}"
                             )
 
                             self.writer.add_scalar("Loss/total", total_loss.item(), i)
+                            self.writer.add_scalar("Accuracy/coarse_synth", acc, i)
+
+                            # Log coarse_mdepth same as synth for now (since we train on it)
+                            self.writer.add_scalar("Accuracy/coarse_mdepth", acc, i)
+                            self.writer.add_scalar("Accuracy/fine_mdepth", acc_fine, i)
+                            self.writer.add_scalar("Accuracy/kp_position", acc_fine, i)
+
+                            self.writer.add_scalar("Loss/coarse", loss_ds.item(), i)
+                            self.writer.add_scalar("Loss/fine", loss_fine.item(), i)
                             self.writer.add_scalar(
-                                "Loss/superpoint_distill", loss_sp.item(), i
+                                "Loss/reliability", loss_kp.item(), i
                             )
                             self.writer.add_scalar(
-                                "Loss/desc_softmax", loss_ds.item(), i
+                                "Loss/keypoint_pos", loss_fine.item(), i
                             )
-                            self.writer.add_scalar("Accuracy/match", acc, i)
+
+                            self.writer.add_scalar(
+                                "Count/matches_coarse", avg_matches, i
+                            )
+                            self.writer.add_scalar(
+                                "Loss/heatmap_distill", loss_sp.item(), i
+                            )
+
                     else:
                         total_loss = self.w_heatmap * loss_sp
                         self.opt.zero_grad()
                         self.scaler.scale(total_loss).backward()
+
+                        scale_before = self.scaler.get_scale()
                         self.scaler.step(self.opt)
                         self.scaler.update()
 
