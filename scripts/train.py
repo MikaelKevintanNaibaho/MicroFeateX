@@ -1,11 +1,13 @@
 import sys
-import os
 import yaml
 import torch
+import argparse
+from pathlib import Path
 from torch.utils.data import DataLoader
 
-# Add project root to python path so we can import 'microfeatex'
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+# Add project root to path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
 
 from microfeatex.models.student import EfficientFeatureExtractor
 from microfeatex.models.teacher import SuperPointTeacher
@@ -20,26 +22,25 @@ def load_config(path):
 
 
 def main():
-    # 1. Load Config
-    config_path = os.path.join(os.path.dirname(__file__), "../config/coco_train.yaml")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config/coco_train.yaml")
+    args = parser.parse_args()
+
+    # 1. Config & Paths
+    config_path = PROJECT_ROOT / args.config
     config = load_config(config_path)
 
-    # Get the project root directory (one level up from scripts/)
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-    # Join root with the path from config
-    weights_path = os.path.join(project_root, config["paths"]["superpoint_weights"])
-
-    if not os.path.exists(weights_path):
-        raise FileNotFoundError(
-            f"CRITICAL: Teacher weights not found at {weights_path}"
-        )
+    # Resolve relative paths in config to absolute
+    config["paths"]["coco_root"] = str(PROJECT_ROOT / config["paths"]["coco_root"])
+    config["paths"]["log_dir"] = str(PROJECT_ROOT / config["paths"]["log_dir"])
+    config["paths"]["checkpoint_dir"] = str(
+        PROJECT_ROOT / config["paths"]["checkpoint_dir"]
+    )
 
     device = torch.device(config["system"]["device"])
-
     print(f"Initializing {config['experiment']['name']} on {device}")
 
-    # 2. Dataset & DataLoader
+    # 2. Dataset
     full_dataset = Dataset(config["paths"]["coco_root"], config)
     train_size = int(0.9 * len(full_dataset))
     val_size = len(full_dataset) - train_size
@@ -60,40 +61,31 @@ def main():
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config["training"]["batch_size"],  # Can be larger if VRAM allows
-        shuffle=False,  # Don't shuffle validation
+        batch_size=config["training"]["batch_size"],
+        shuffle=False,
         num_workers=config["system"]["num_workers"],
         pin_memory=True,
-        drop_last=False,
     )
+
     # 3. Models
-    print("Building models...")
     student = EfficientFeatureExtractor(
         descriptor_dim=config["model"]["descriptor_dim"],
         binary_bits=config["model"]["binary_bits"],
     ).to(device)
 
-    teacher = SuperPointTeacher(device=device)  # Assumes weights exist
+    weights_path = PROJECT_ROOT / config["paths"]["superpoint_weights"]
+    teacher = SuperPointTeacher(weights_path=str(weights_path), device=str(device))
 
-    # 4. Augmenter (GPU)
+    # 4. Trainer
     augmenter = AugmentationPipe(config, device).to(device)
-
-    # 5. Trainer
     trainer = Trainer(student, teacher, train_loader, val_loader, config, augmenter)
 
-    # 6. Resume if needed
-    resume_path = config["paths"]["resume_path"]
-    if resume_path:
-        # Construct full path if it's relative
-        if not os.path.isabs(resume_path):
-            resume_path = os.path.join(project_root, resume_path)
+    # 5. Resume
+    if config["paths"].get("resume_path"):
+        resume_path = PROJECT_ROOT / config["paths"]["resume_path"]
+        if resume_path.exists():
+            trainer.load_checkpoint(str(resume_path))
 
-        if os.path.exists(resume_path):
-            trainer.load_checkpoint(resume_path)
-        else:
-            print(f"WARNING: Checkpoint not found at {resume_path}")
-            print("Starting fresh training session...")
-    # 7. Start
     trainer.train_loop()
 
 

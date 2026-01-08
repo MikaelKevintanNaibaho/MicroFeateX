@@ -29,6 +29,12 @@ training:
   image_log_interval: 100   # Update all images every 100 steps
   save_interval: 5          # Save checkpoint every 5 epochs
   vis_top_k: 500
+  distill_mode: "triplet"  # Options: "cosine" (stable) or "triplet" (harder)
+  loss_weights:
+    heatmap: 10.0   # High weight to force learning of small keypoints
+    distill: 1.0      # Teacher imitation
+    siamese: 2.0      # Viewpoint invariance
+    quant: 0.1        # Binary constraint
 
 augmentation:
   warp_resolution: [1200, 900]  # (W, H) - Internal processing size
@@ -38,11 +44,6 @@ augmentation:
   geometric: true                # Enable geometric transformations
   use_tps: false                 # Enable TPS warps (set to true for non-rigid)
   tps_prob: 0.5                  # Probability of applying TPS when enabled
-  difficulty: 0.5                # Transformation strength (0.1-0.5)
+  difficulty: 0.3                # Transformation strength (0.1-0.5)
 
-distill_mode: "triplet"  # Options: "cosine" (stable) or "triplet" (harder)
-loss_weights:
-    heatmap: 100.0   # High weight to force learning of small keypoints
-    distill: 1.0      # Teacher imitation
-    siamese: 2.0      # Viewpoint invariance
-    quant: 0.1        # Binary constraint
+
