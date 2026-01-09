@@ -264,6 +264,9 @@ class AugmentationPipe(nn.Module):
         Returns:
             [N, 2] Keypoints in Target Output (Final) coordinates
         """
+        # FIX: Ensure H and pts are on the same device
+        H = H.to(pts.device)
+
         # 1. Project Source Points back to Crop Coordinates
         # Scale factor: Output -> Crop
         crop_h = self.high_h - self.low_h

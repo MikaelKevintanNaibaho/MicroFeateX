@@ -117,21 +117,15 @@ def get_corresponding_pts(p1, p2, H1_struct, H2_struct, augmentor, h, w, crop=No
 
                 # If using simple Homography:
                 if not is_tps:
-                    # augmentor.warp_points maps Source -> Target
-                    # To get correspondence for a point in Target, we need Target -> Source
-                    # We can use the inverse homography directly
+                    # FIX: Use augmentor.warp_points which handles the transformation correctly
+                    # We need inverse mapping: target -> source
+                    # So we invert H2 and pass it to warp_points
                     H_inv = torch.inverse(H2[batch_idx])
-                    # Normalize points to homogeneous
-                    ones = torch.ones(target_pts.shape[0], 1, device=p1.device)
-                    pts_homo = torch.cat([target_pts, ones], dim=1)
-                    src_pts_homo = (H_inv @ pts_homo.T).T
-                    src_pts = src_pts_homo[:, :2] / (src_pts_homo[:, 2:3] + 1e-8)
 
-                    # If the augmentor has a warp_points method that handles cropping offsets
-                    if hasattr(augmentor, "warp_points"):
-                        # Note: augmentor.warp_points usually does Src -> Dst
-                        # Here we approximate for now or assume simple H if augmentor logic is complex
-                        pass
+                    # warp_points expects pts in output coordinates and H on same device
+                    # target_pts are already in the right coordinate system
+                    src_pts = augmentor.warp_points(H_inv, target_pts)
+
                 else:
                     # Use TPS unwarping if parameters exist
                     T = (
@@ -141,7 +135,10 @@ def get_corresponding_pts(p1, p2, H1_struct, H2_struct, augmentor, h, w, crop=No
                         W_tps[batch_idx].unsqueeze(0),
                         A_tps[batch_idx].unsqueeze(0),
                     )
-                    src_pts = augmentor.get_correspondences(target_pts, T)
+                    # Note: This path needs proper implementation if TPS is used
+                    # For now, fallback to simple inverse homography
+                    H_inv = torch.inverse(H2[batch_idx])
+                    src_pts = augmentor.warp_points(H_inv, target_pts)
 
                 tgt_pts = target_pts.clone()
 

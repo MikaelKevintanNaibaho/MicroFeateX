@@ -164,6 +164,7 @@ class Trainer:
         self.w_fine = loss_cfg.get("fine", 1.0)
 
         self.start_step = 0
+        self.current_epoch = 0
         self.load_checkpoint()
 
     def load_checkpoint(self):
@@ -183,8 +184,10 @@ class Trainer:
                 self.scaler.load_state_dict(checkpoint["scaler_state"])
             if "step" in checkpoint:
                 self.start_step = checkpoint["step"] + 1
+            if "epoch" in checkpoint:
+                self.current_epoch = checkpoint["epoch"]
 
-            print(f"✅ Resumed from step {self.start_step}")
+            print(f"✅ Resumed from step {self.start_step}, epoch {self.current_epoch}")
         else:
             print("🚀 No checkpoint found. Starting from scratch.")
 
@@ -202,6 +205,7 @@ class Trainer:
                     batch = next(self.data_iter)
                 except StopIteration:
                     self.data_iter = iter(self.data_loader)
+                    self.current_epoch += 1
                     batch = next(self.data_iter)
 
                 with autocast("cuda"):
@@ -215,17 +219,18 @@ class Trainer:
                     out2 = self.net(p2)
 
                     # Extract heads
-                    hmap1, desc1, off1 = (
+                    hmap1, desc1, rel1, off1 = (
                         out1["heatmap"],
                         out1["descriptors"],
+                        out1["reliability"],
                         out1["offset"],
                     )
-                    hmap2, desc2, off2 = (
+                    hmap2, desc2, rel2, off2 = (
                         out2["heatmap"],
                         out2["descriptors"],
+                        out2["reliability"],
                         out2["offset"],
                     )
-
                     # 4. Forward Pass (Teacher)
                     with torch.no_grad():
                         t_out1 = self.teacher(p1)
@@ -258,21 +263,32 @@ class Trainer:
                         pts1, pts2 = positives[b][:, :2], positives[b][:, 2:]
 
                         # --- Descriptor Loss ---
-                        m1 = desc1[b, :, pts1[:, 1].long(), pts1[:, 0].long()].t()
-                        m2 = desc2[b, :, pts2[:, 1].long(), pts2[:, 0].long()].t()
+
+                        # pts1 and 2 is in coarse feature map coordinates (H/8, W/8), but the desc1 is also at H/8 resolution.
+                        # the coordinates might still be float from the correspondence generation, so need to be ensured they're properly bounded
+                        pts1_y = torch.clamp(pts1[:, 1].long(), 0, desc1.shape[2] - 1)
+                        pts1_x = torch.clamp(pts1[:, 0].long(), 0, desc1.shape[3] - 1)
+                        pts2_y = torch.clamp(pts2[:, 1].long(), 0, desc2.shape[2] - 1)
+                        pts2_x = torch.clamp(pts2[:, 0].long(), 0, desc2.shape[3] - 1)
+
+                        m1 = desc1[b, :, pts1_y, pts1_x].t()
+                        m2 = desc2[b, :, pts2_y, pts2_x].t()
                         loss_ds, conf = losses.dual_softmax_loss(m1, m2, temp=0.1)
 
                         # --- Reliability/Keypoint Loss ---
-                        h1_pred = hmap1[b, 0, pts1[:, 1].long(), pts1[:, 0].long()]
-                        h2_pred = hmap2[b, 0, pts2[:, 1].long(), pts2[:, 0].long()]
+                        # Sample reliability at coarse feature map resolution
+                        # Reliability is [B, 1, H/8, W/8], same as descriptors
+                        rel1_pred = rel1[b, 0, pts1_y, pts1_x]
+                        rel2_pred = rel2[b, 0, pts2_y, pts2_x]
+
                         loss_kp = losses.keypoint_loss(
-                            h1_pred, conf
-                        ) + losses.keypoint_loss(h2_pred, conf)
+                            rel1_pred, conf
+                        ) + losses.keypoint_loss(rel2_pred, conf)
 
                         # --- Fine / Offset Loss & Accuracy ---
                         # Sample predicted offsets
-                        off1_pred = off1[b, :, pts1[:, 1].long(), pts1[:, 0].long()].t()
-                        off2_pred = off2[b, :, pts2[:, 1].long(), pts2[:, 0].long()].t()
+                        off1_pred = off1[b, :, pts1_y, pts1_x].t()
+                        off2_pred = off2[b, :, pts2_y, pts2_x].t()
 
                         # Targets: Real Float Coord - Cell Center
                         off1_target = pts1 - (pts1.long().float() + 0.5)
@@ -318,17 +334,11 @@ class Trainer:
                         scale_before = self.scaler.get_scale()
                         self.scaler.step(self.opt)
                         self.scaler.update()
-
-                        scale_after = self.scaler.get_scale()
-                        if scale_after >= scale_before:
-                            self.scheduler.step()
+                        self.scheduler.step()
 
                         if step_counter % 10 == 0:
-                            steps_per_epoch = len(self.data_loader)
-                            epoch = step_counter // steps_per_epoch
-
                             pbar.set_description(
-                                f"Ep: {epoch} | "
+                                f"Ep: {self.current_epoch} | "
                                 f"Loss: {total_loss.item():.3f} | "
                                 f"Acc: {acc:.3f} | "
                                 f"Fine: {loss_fine.item():.3f}"
@@ -366,13 +376,14 @@ class Trainer:
                             )
 
                     else:
+                        # Fallback when no valid matches
                         total_loss = self.w_heatmap * loss_sp
                         self.opt.zero_grad()
                         self.scaler.scale(total_loss).backward()
 
-                        scale_before = self.scaler.get_scale()
                         self.scaler.step(self.opt)
                         self.scaler.update()
+                        self.scheduler.step()
 
                 if step_counter % 500 == 0:
                     self.vis.log_advanced_visuals(

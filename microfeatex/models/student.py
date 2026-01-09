@@ -137,8 +137,8 @@ class EfficientFeatureExtractor(nn.Module):
         # --- Reliability ---
         reliability = torch.sigmoid(self.reliability_head(features))
 
-        # --- Offset (New) ---
-        offsets = torch.tanh(self.offset_head(features))
+        # --- Offset  ---
+        offsets = torch.tanh(self.offset_head(features)) * 0.5
 
         return {
             "heatmap": heatmap,  # RENAMED from "keypoint_logits"
