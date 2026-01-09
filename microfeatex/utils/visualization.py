@@ -28,7 +28,8 @@ class Visualizer:
         for i in range(B):
             # Normalize to 0-255
             h_img = heatmap_np[i, 0]
-            h_img = (h_img - h_img.min()) / (h_img.max() - h_img.min() + 1e-8)
+            # h_img = (h_img - h_img.min()) / (h_img.max() - h_img.min() + 1e-8)
+            h_img = np.clip(h_img, 0, 1)
             h_img = (h_img * 255).astype(np.uint8)
 
             # Apply OpenCV colormap

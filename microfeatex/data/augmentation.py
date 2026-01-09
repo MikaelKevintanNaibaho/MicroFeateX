@@ -288,7 +288,6 @@ class AugmentationPipe(nn.Module):
         pts_warped = pts_warped[:, :2] / (pts_warped[:, 2:3] + 1e-8)
 
         # 3. Project Target Points to Output Coordinates
-        # Remove offset and Scale down (Original Large Coords -> Output)
         pts_final = (pts_warped - offset) / scale
 
         return pts_final

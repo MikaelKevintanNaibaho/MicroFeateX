@@ -159,7 +159,7 @@ class Trainer:
         loss_cfg = self.config.get("training", {}).get("loss_weights", {})
         self.w_heatmap = loss_cfg.get("heatmap", 10.0)
         self.w_distill = loss_cfg.get("distill", 1.0)
-        self.w_reliability = 1.0
+        self.w_reliability = loss_cfg.get("reliability", 0.1)
         # Default fine weight to 1.0 if not specified
         self.w_fine = loss_cfg.get("fine", 1.0)
 
@@ -190,6 +190,38 @@ class Trainer:
             print(f"✅ Resumed from step {self.start_step}, epoch {self.current_epoch}")
         else:
             print("🚀 No checkpoint found. Starting from scratch.")
+
+    @staticmethod
+    def process_teacher_output(scores, target_size, return_logits=False):
+        """
+        Robustly processes teacher logits.
+        1. Forces resize/transpose to exactly H/8, W/8 (Coarse Grid).
+        2. If return_logits=True, returns here (for Loss).
+        3. Else, applies Softmax -> Pixel Shuffle (for Vis).
+        """
+        H, W = target_size
+        h_grid, w_grid = H // 8, W // 8
+
+        # 1. Handle Transpose (Swap H/W if needed)
+        if scores.shape[-1] == H and scores.shape[-2] == W:
+            scores = scores.transpose(-1, -2)
+
+        # 2. Force Resize to Coarse Grid
+        if scores.shape[-2] != h_grid or scores.shape[-1] != w_grid:
+            scores = F.interpolate(
+                scores, size=(h_grid, w_grid), mode="bilinear", align_corners=False
+            )
+
+        # --- STOP HERE FOR LOSS ---
+        if return_logits:
+            return scores
+
+        # 3. Process to Heatmap (For Visualization)
+        probs = F.softmax(scores, dim=1)
+        corners = probs[:, :-1, :, :]  # Remove dustbin
+        heatmap = F.pixel_shuffle(corners, 8)  # Upsample
+
+        return heatmap
 
     def train(self):
         self.net.train()
@@ -236,9 +268,19 @@ class Trainer:
                         t_out1 = self.teacher(p1)
                         t_out2 = self.teacher(p2)
 
+                    target_shape = p1.shape[2:]
+
+                    # 1. Get Clean Coarse LOGITS for the Loss function
+                    # return_logits=True means we get [B, 65, 60, 80]
+                    t_logits1 = self.process_teacher_output(
+                        t_out1["scores"], target_shape, return_logits=True
+                    )
+                    t_logits2 = self.process_teacher_output(
+                        t_out2["scores"], target_shape, return_logits=True
+                    )
                     # 5. Distillation Loss (Dense)
-                    loss_sp1 = losses.superpoint_distill_loss(hmap1, t_out1["scores"])
-                    loss_sp2 = losses.superpoint_distill_loss(hmap2, t_out2["scores"])
+                    loss_sp1 = losses.superpoint_distill_loss(hmap1, t_logits1)
+                    loss_sp2 = losses.superpoint_distill_loss(hmap2, t_logits2)
                     loss_sp = (loss_sp1 + loss_sp2) / 2.0
 
                     # 6. Correspondences
@@ -273,7 +315,7 @@ class Trainer:
 
                         m1 = desc1[b, :, pts1_y, pts1_x].t()
                         m2 = desc2[b, :, pts2_y, pts2_x].t()
-                        loss_ds, conf = losses.dual_softmax_loss(m1, m2, temp=0.1)
+                        loss_ds, conf = losses.dual_softmax_loss(m1, m2, temp=0.2)
 
                         # --- Reliability/Keypoint Loss ---
                         # Sample reliability at coarse feature map resolution
@@ -299,8 +341,9 @@ class Trainer:
                         )
 
                         # Calculate Fine Accuracy (% with L1 error < 0.5 pixels)
-                        fine_diff = torch.abs(off1_pred - off1_target).sum(dim=1)
-                        acc_fine = (fine_diff < 0.5).float().mean()
+                        fine_diff = torch.norm(off1_pred - off1_target, dim=1)
+                        pixel_dist = fine_diff * 8.0
+                        acc_fine = (pixel_dist < 3).float().mean()
 
                         batch_loss_ds += loss_ds
                         batch_loss_kp += loss_kp
@@ -386,12 +429,15 @@ class Trainer:
                         self.scheduler.step()
 
                 if step_counter % 500 == 0:
+                    vis_t_heat = self.process_teacher_output(
+                        t_out1["scores"], target_shape, return_logits=False
+                    )
                     self.vis.log_advanced_visuals(
                         step=step_counter,
                         img1=p1,
                         img2=p2,
                         s_heat=hmap1,  # Student Heatmap
-                        t_heat=t_out1["scores"],  # Teacher Heatmap
+                        t_heat=vis_t_heat,  # Teacher Heatmap
                         desc1=desc1,  # Student Descriptors
                         desc2=desc2,
                         s_rel=out1["reliability"],  # Student Reliability
