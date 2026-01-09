@@ -19,6 +19,7 @@ from microfeatex.models.student import EfficientFeatureExtractor
 from microfeatex.models.teacher import SuperPointTeacher
 from microfeatex.data.augmentation import AugmentationPipe
 from microfeatex.data.dataset import Dataset
+from microfeatex.utils.visualization import Visualizer
 from . import utils
 from . import losses
 
@@ -147,11 +148,12 @@ class Trainer:
         log_dir = os.path.join(args.ckpt_save_path, "logdir")
         os.makedirs(log_dir, exist_ok=True)
 
-        self.writer = SummaryWriter(
-            os.path.join(
-                log_dir, f"{args.model_name}_{time.strftime('%Y_%m_%d-%H_%M_%S')}"
-            )
+        log_path = os.path.join(
+            log_dir, f"{args.model_name}_{time.strftime('%Y_%m_%d-%H_%M_%S')}"
         )
+        self.vis = Visualizer(log_dir=log_path)
+        self.writer = self.vis.writer
+
         self.steps = args.n_steps
 
         loss_cfg = self.config.get("training", {}).get("loss_weights", {})
@@ -161,14 +163,40 @@ class Trainer:
         # Default fine weight to 1.0 if not specified
         self.w_fine = loss_cfg.get("fine", 1.0)
 
+        self.start_step = 0
+        self.load_checkpoint()
+
+    def load_checkpoint(self):
+        """Loads the last checkpoint if it exists to resume training."""
+        ckpt_path = os.path.join(self.args.ckpt_save_path, "last.pth")
+        if os.path.exists(ckpt_path):
+            print(f"🔄 Found checkpoint at {ckpt_path}. Resuming...")
+            checkpoint = torch.load(ckpt_path, map_location=self.dev)
+
+            # Load Model
+            self.net.load_state_dict(checkpoint["model_state"])
+
+            # Load Optimizer & Scaler (Crucial for correct resumption)
+            if "optimizer_state" in checkpoint:
+                self.opt.load_state_dict(checkpoint["optimizer_state"])
+            if "scaler_state" in checkpoint:
+                self.scaler.load_state_dict(checkpoint["scaler_state"])
+            if "step" in checkpoint:
+                self.start_step = checkpoint["step"] + 1
+
+            print(f"✅ Resumed from step {self.start_step}")
+        else:
+            print("🚀 No checkpoint found. Starting from scratch.")
+
     def train(self):
         self.net.train()
-        difficulty = 0.3
 
         print(f"Starting training on {self.dev} for {self.steps} steps...")
 
-        with tqdm.tqdm(total=self.steps) as pbar:
-            for i in range(self.steps):
+        step_counter = self.start_step
+
+        with tqdm.tqdm(total=self.steps, initial=self.start_step) as pbar:
+            while step_counter < self.steps:
                 # 1. Get Batch
                 try:
                     batch = next(self.data_iter)
@@ -178,7 +206,9 @@ class Trainer:
 
                 with autocast("cuda"):
                     # 2. Augment
-                    p1, p2, H1, H2 = utils.make_batch(self.augmentor, batch, difficulty)
+                    p1, p2, H1, H2 = utils.make_batch(
+                        self.augmentor, batch, self.augmentor.difficulty
+                    )
 
                     # 3. Forward Pass (Student)
                     out1 = self.net(p1)
@@ -293,9 +323,9 @@ class Trainer:
                         if scale_after >= scale_before:
                             self.scheduler.step()
 
-                        if i % 10 == 0:
+                        if step_counter % 10 == 0:
                             steps_per_epoch = len(self.data_loader)
-                            epoch = i // steps_per_epoch
+                            epoch = step_counter // steps_per_epoch
 
                             pbar.set_description(
                                 f"Ep: {epoch} | "
@@ -304,28 +334,35 @@ class Trainer:
                                 f"Fine: {loss_fine.item():.3f}"
                             )
 
-                            self.writer.add_scalar("Loss/total", total_loss.item(), i)
-                            self.writer.add_scalar("Accuracy/coarse_synth", acc, i)
-
-                            # Log coarse_mdepth same as synth for now (since we train on it)
-                            self.writer.add_scalar("Accuracy/coarse_mdepth", acc, i)
-                            self.writer.add_scalar("Accuracy/fine_mdepth", acc_fine, i)
-                            self.writer.add_scalar("Accuracy/kp_position", acc_fine, i)
-
-                            self.writer.add_scalar("Loss/coarse", loss_ds.item(), i)
-                            self.writer.add_scalar("Loss/fine", loss_fine.item(), i)
                             self.writer.add_scalar(
-                                "Loss/reliability", loss_kp.item(), i
+                                "Loss/total", total_loss.item(), step_counter
                             )
                             self.writer.add_scalar(
-                                "Loss/keypoint_pos", loss_fine.item(), i
+                                "Accuracy/coarse_synth", acc, step_counter
                             )
 
                             self.writer.add_scalar(
-                                "Count/matches_coarse", avg_matches, i
+                                "Accuracy/kp_position", acc_fine, step_counter
+                            )
+
+                            self.writer.add_scalar(
+                                "Loss/coarse", loss_ds.item(), step_counter
                             )
                             self.writer.add_scalar(
-                                "Loss/heatmap_distill", loss_sp.item(), i
+                                "Loss/fine", loss_fine.item(), step_counter
+                            )
+                            self.writer.add_scalar(
+                                "Loss/reliability", loss_kp.item(), step_counter
+                            )
+                            self.writer.add_scalar(
+                                "Loss/keypoint_pos", loss_fine.item(), step_counter
+                            )
+
+                            self.writer.add_scalar(
+                                "Count/matches_coarse", avg_matches, step_counter
+                            )
+                            self.writer.add_scalar(
+                                "Loss/heatmap_distill", loss_sp.item(), step_counter
                             )
 
                     else:
@@ -337,17 +374,41 @@ class Trainer:
                         self.scaler.step(self.opt)
                         self.scaler.update()
 
-                if (i + 1) % self.args.save_ckpt_every == 0:
-                    path = os.path.join(
-                        self.args.ckpt_save_path, f"{self.args.model_name}_{i + 1}.pth"
+                if step_counter % 500 == 0:
+                    self.vis.log_advanced_visuals(
+                        step=step_counter,
+                        img1=p1,
+                        img2=p2,
+                        s_heat=hmap1,  # Student Heatmap
+                        t_heat=t_out1["scores"],  # Teacher Heatmap
+                        desc1=desc1,  # Student Descriptors
+                        desc2=desc2,
+                        s_rel=out1["reliability"],  # Student Reliability
                     )
-                    torch.save(self.net.state_dict(), path)
-                    torch.save(
-                        self.net.state_dict(),
-                        os.path.join(self.args.ckpt_save_path, "last.pth"),
-                    )
-                    print(f"Saved checkpoint to {path}")
 
+                if (step_counter + 1) % self.args.save_ckpt_every == 0:
+                    save_path = os.path.join(self.args.ckpt_save_path, "last.pth")
+                    torch.save(
+                        {
+                            "model_state": self.net.state_dict(),
+                            "optimizer_state": self.opt.state_dict(),
+                            "scaler_state": self.scaler.state_dict(),
+                            "step": step_counter,
+                        },
+                        save_path,
+                    )
+
+                    # Also save indexed checkpoint for history
+                    history_path = os.path.join(
+                        self.args.ckpt_save_path,
+                        f"{self.args.model_name}_{step_counter + 1}.pth",
+                    )
+                    torch.save(
+                        self.net.state_dict(), history_path
+                    )  # Save just weights for inference
+                    print(f"Saved checkpoint to {save_path}")
+
+                step_counter += 1
                 pbar.update(1)
 
 

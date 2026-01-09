@@ -1,169 +1,149 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 
 
-class DepthwiseSeparableConv(nn.Module):
+class BasicLayer(nn.Module):
     """
-    Splits spatial and channel mixing for efficiency.
-    Standard in MobileNet and XFeat architectures.
+    Simple convolutional block used throughout the backbone
     """
 
     def __init__(self, in_c, out_c, stride=1, kernel_size=3):
         super().__init__()
-        self.depthwise = nn.Conv2d(
-            in_c,
-            in_c,
-            kernel_size,
-            stride=stride,
-            padding=kernel_size // 2,
-            groups=in_c,
-            bias=False,
+        # Standard padding to keep size if stride=1
+        padding = kernel_size // 2
+        self.conv = nn.Conv2d(
+            in_c, out_c, kernel_size, stride=stride, padding=padding, bias=False
         )
-        self.pointwise = nn.Conv2d(in_c, out_c, 1, bias=False)
         self.bn = nn.BatchNorm2d(out_c)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        return self.relu(self.bn(self.pointwise(self.depthwise(x))))
+        return self.relu(self.bn(self.conv(x)))
 
 
-class DeepBitHash(nn.Module):
+class LightweightBackbone(nn.Module):
     """
-    DeepBit layer.
-    During training: Outputs tanh(x) to approximate sign function (differentiable).
-    During eval: Outputs sign(x) for binary codes.
+    Custom Lightweight Backbone
     """
 
-    def __init__(self, in_dim, out_bits=256):
+    def __init__(self):
         super().__init__()
-        self.proj = nn.Conv2d(in_dim, out_bits, kernel_size=1)
-        self.tanh = nn.Tanh()
-        self.t = 1.0
+
+        self.block1 = nn.Sequential(
+            BasicLayer(1, 4, stride=2, kernel_size=3),  # H/2
+            BasicLayer(4, 4, kernel_size=3),
+        )
+
+        self.block2 = nn.Sequential(
+            BasicLayer(4, 8, stride=2, kernel_size=3),  # H/4
+            BasicLayer(8, 8, kernel_size=3),
+        )
+
+        self.block3 = nn.Sequential(
+            BasicLayer(8, 24, stride=2, kernel_size=3),  # H/8
+            BasicLayer(24, 24, kernel_size=3),
+        )
+
+        self.block4 = nn.Sequential(
+            BasicLayer(24, 64, stride=2, kernel_size=3),  # H/16
+            BasicLayer(64, 64, kernel_size=3),
+        )
+
+        self.block5 = BasicLayer(64, 64, kernel_size=3)
+        self.block6 = BasicLayer(64, 128, stride=2, kernel_size=3)  # H/32
+
+        # Fusion layer to combine multi-scale features
+        self.fusion = nn.Sequential(
+            BasicLayer(24 + 64 + 128, 64, kernel_size=3),
+            BasicLayer(64, 64, kernel_size=3),
+        )
 
     def forward(self, x):
-        x = self.proj(x)
-        if self.training:
-            return self.tanh(x * self.t)
-        else:
-            # Binarize to {-1, 1}
-            return torch.sign(x)
+        x1 = self.block1(x)  # H/2
+        x2 = self.block2(x1)  # H/4
+        f8 = self.block3(x2)  # H/8
+        x4 = self.block4(f8)  # H/16
+        x5 = self.block5(x4)  # H/16
+        f32 = self.block6(x5)  # H/32
+
+        # Multi-scale feature fusion
+        f16 = F.interpolate(x5, scale_factor=2, mode="bilinear", align_corners=False)
+        f32_up = F.interpolate(
+            f32, scale_factor=4, mode="bilinear", align_corners=False
+        )
+
+        # Concatenate features at H/8 resolution
+        # Note: Ensure sizes match exactly
+        f16 = F.interpolate(
+            f16, size=f8.shape[2:], mode="bilinear", align_corners=False
+        )
+        f32_up = F.interpolate(
+            f32_up, size=f8.shape[2:], mode="bilinear", align_corners=False
+        )
+
+        fused = torch.cat([f8, f16, f32_up], dim=1)
+
+        return self.fusion(fused)  # Output at H/8 resolution
 
 
 class EfficientFeatureExtractor(nn.Module):
     def __init__(self, descriptor_dim=64, binary_bits=256):
         super().__init__()
 
-        # --- 1. Improved Backbone (MobileNetV3-Small) ---
-        # We use weights=DEFAULT for pretrained ImageNet features.
-        mobilenet = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
+        self.backbone = LightweightBackbone()
 
-        # Modify first layer to accept 1-channel Grayscale input
-        original_first_layer = mobilenet.features[0][0]
-        new_first_layer = nn.Conv2d(
-            1, 16, kernel_size=3, stride=2, padding=1, bias=False
-        )
-        with torch.no_grad():
-            # Sum RGB weights to initialize Grayscale weights
-            new_first_layer.weight[:] = original_first_layer.weight.sum(
-                dim=1, keepdim=True
-            )
-
-        # We construct a deeper backbone than the original code.
-        # MobileNetV3-Small blocks:
-        # 0: Conv (s2) -> /2 resolution
-        # 1: InvertedResidual (s2) -> /4 resolution
-        # 2: InvertedResidual (s2) -> /8 resolution (Target for SuperPoint alignment)
-        # 3: InvertedResidual (s1) -> /8 resolution (Refinement)
-
-        # Taking layers 0 through 3 ensures we get to /8 resolution with sufficient context.
-        # Note: The indices below rely on the standard torchvision MobileNetV3 structure.
-        self.backbone = nn.Sequential(
-            new_first_layer,  # Layer 0 (Modified)
-            mobilenet.features[0][1],  # BN
-            mobilenet.features[0][2],  # HardSwish
-            mobilenet.features[1],  # Layer 1 (Stride 2)
-            mobilenet.features[2],  # Layer 2 (Stride 2)
-            mobilenet.features[3],  # Layer 3 (Stride 1, deeper features)
-        )
-
-        # SHARED Mixer (The "Neck")
-        self.neck = nn.Sequential(
-            nn.Conv2d(24, 64, kernel_size=1),  # CHANGED: 64 -> 24
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-        )
-
-        # 1. Detector Head (Heatmap) - Keeps 65 channels for cell-wise softmax
-        self.detector_head = nn.Sequential(
-            nn.Conv2d(64, 256, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(256, 65, 1),
+        # 1. Detector Head (Heatmap)
+        # Note: Must output 65 channels (64 cells + 1 dustbin) for PixelShuffle
+        self.keypoint_head = nn.Sequential(
+            BasicLayer(64, 32, kernel_size=3), nn.Conv2d(32, 65, kernel_size=1)
         )
 
         # 2. Descriptor Head
         self.descriptor_head = nn.Sequential(
-            DepthwiseSeparableConv(64, 128, stride=1),
-            DepthwiseSeparableConv(128, descriptor_dim, stride=1),
+            BasicLayer(64, 128, kernel_size=3),
+            nn.Conv2d(128, descriptor_dim, kernel_size=1),
+            nn.BatchNorm2d(descriptor_dim),  # Normalize before output
         )
 
-        # --- NEW: Reliability Head (XFeat specific) ---
-        # Predicts how "matchable" a pixel is (0 to 1)
+        # 3. Reliability Head (Required by trainer)
         self.reliability_head = nn.Sequential(
-            DepthwiseSeparableConv(64, 32, stride=1), nn.Conv2d(32, 1, kernel_size=1)
+            BasicLayer(64, 32, kernel_size=3), nn.Conv2d(32, 1, kernel_size=1)
         )
 
-        # --- NEW: Offset Head (XFeat specific) ---
-        # Predicts sub-pixel shifts (dx, dy) to refine grid points
+        # 4. Offset Head (CRITICAL: Added this back so loss_fine works)
         self.offset_head = nn.Sequential(
-            DepthwiseSeparableConv(64, 32, stride=1), nn.Conv2d(32, 2, kernel_size=1)
+            BasicLayer(64, 32, kernel_size=3), nn.Conv2d(32, 2, kernel_size=1)
         )
 
-        # --- 3. Hashing Head (DeepBit) ---
-        self.hashing = DeepBitHash(descriptor_dim, binary_bits)
-
-        # --- 4. Distillation Adapter ---
-        # Maps student descriptors to teacher dimension (256) for loss calculation
-        self.adapter = nn.Conv2d(descriptor_dim, 256, kernel_size=1)
+        # Optional: DeepBit hashing if you want binary codes
+        # self.hashing = DeepBitHash(descriptor_dim, binary_bits)
 
     def forward(self, x):
-        # 1. Extract Backbone Features
-        # Output resolution: H/8, W/8
         features = self.backbone(x)
-        features = self.neck(features)
 
-        # 2. Compute Heatmap (Detector)
-        logits = self.detector_head(features)
+        # --- Keypoints (Heatmap) ---
+        kpts_logits = self.keypoint_head(features)
 
-        # Softmax over the 65 channels
-        probs = F.softmax(logits, dim=1)
+        # Process Logits into Heatmap (Student Logic)
+        probs = F.softmax(kpts_logits, dim=1)
+        corners = probs[:, :-1, :, :]  # Remove dustbin
+        heatmap = F.pixel_shuffle(corners, 8)  # [B, 1, H, W]
 
-        # Remove the "dustbin" channel (last one) -> [B, 64, H/8, W/8]
-        corners = probs[:, :-1, :, :]
-
-        # Pixel Shuffle to recover full resolution -> [B, 1, H, W]
-        heatmap = F.pixel_shuffle(corners, 8)
-
-        # 3. Compute Descriptors
+        # --- Descriptors ---
         desc_raw = self.descriptor_head(features)
+        descriptor = F.normalize(desc_raw, p=2, dim=1)
 
-        # L2 Normalize floating point descriptors (for training stability)
-        desc_norm = F.normalize(desc_raw, p=2, dim=1)
+        # --- Reliability ---
+        reliability = torch.sigmoid(self.reliability_head(features))
 
-        reliability = torch.sigmoid(self.reliability_head(features))  # [B, 1, H/8, W/8]
-        offsets = torch.tanh(self.offset_head(features))  # [B, 2, H/8, W/8
-        # Generate Binary Code (tanh in train, sign in eval)
-        binary_desc = self.hashing(desc_raw)
-
-        # 4. Adapt for Teacher Distillation
-        # We output this specifically for the loss function
-        teacher_aligned_desc = self.adapter(desc_raw)
-        teacher_aligned_desc = F.normalize(teacher_aligned_desc, p=2, dim=1)
+        # --- Offset (New) ---
+        offsets = torch.tanh(self.offset_head(features))
 
         return {
-            "heatmap": heatmap,
-            "descriptors": desc_norm,
+            "heatmap": heatmap,  # RENAMED from "keypoint_logits"
+            "descriptors": descriptor,
             "reliability": reliability,
-            "offset": offsets,
+            "offset": offsets,  # ADDED back
+            # "keypoint_logits": kpts_logits # Optional: keep if you want raw logits
         }

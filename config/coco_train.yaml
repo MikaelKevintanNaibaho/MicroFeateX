@@ -26,7 +26,7 @@ training:
   save_interval: 500 # Steps
   
   loss_weights:
-    heatmap: 10.0   # Weight for SuperPoint Dense Distillation (Focal Loss)
+    heatmap: 1.0   # Weight for SuperPoint Dense Distillation (Focal Loss)
     distill: 1.0    # Weight for Descriptor Matching (Dual Softmax)
     # reliability: 1.0 (Hardcoded scaling in keypoint_loss)
 
@@ -38,5 +38,5 @@ augmentation:
   geometric: true              
   use_tps: true                
   tps_prob: 0.5                
-  difficulty: 0.3
+  difficulty: 0.1
 
