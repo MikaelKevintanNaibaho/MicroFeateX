@@ -19,7 +19,8 @@ model:
   teacher: "alike"         # Options: "superpoint" or "alike"
   alike_model: "alike-t"   # Options: alike-t, alike-s, alike-n, alike-l
   descriptor_dim: 64
-  binary_bits: 256
+  width_mult: 1.0
+  use_depthwise: false
   
 training:
   batch_size: 4
@@ -28,10 +29,10 @@ training:
   save_interval: 500 # Steps
   
   loss_weights:
-    heatmap: 1000.0   # Weight for SuperPoint Dense Distillation (Focal Loss)
-    distill: 2.0    # Weight for Descriptor Matching (Dual Softmax)
+    heatmap: 1.0   # Weight for SuperPoint Dense Distillation (Focal Loss)
+    distill: 1.0    # Weight for Descriptor Matching (Dual Softmax)
     fine: 1.0
-    reliability: 2.0
+    reliability: 10.0
 
 visualization:
   colormap: "hot"   # Options: jet, inferno, turbo, hot, bone, plasma

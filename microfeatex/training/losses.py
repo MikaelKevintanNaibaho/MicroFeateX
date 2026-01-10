@@ -1,5 +1,5 @@
 """
-training/losses.py
+microfeatex/training/losses.py - Complete Loss Functions
 """
 
 import torch
@@ -14,6 +14,9 @@ except ImportError:
 
 
 def dual_softmax_loss(X, Y, temp=0.2):
+    """
+    Dual Softmax loss for descriptor matching.
+    """
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
         raise RuntimeError("Error: X and Y shapes must match and be 2D matrices")
 
@@ -34,6 +37,7 @@ def dual_softmax_loss(X, Y, temp=0.2):
 
 
 def smooth_l1_loss(input, target, beta=2.0, size_average=True):
+    """Smooth L1 loss."""
     diff = torch.abs(input - target)
     loss = torch.where(diff < beta, 0.5 * diff**2 / beta, diff - 0.5 * beta)
     return loss.mean() if size_average else loss.sum()
@@ -41,7 +45,7 @@ def smooth_l1_loss(input, target, beta=2.0, size_average=True):
 
 def fine_loss(f1, f2, pts1, pts2, fine_module, ws=7):
     """
-    Compute Fine features and spatial loss
+    Compute Fine features and spatial loss.
     """
     C, H, W = f1.shape
     N = len(pts1)
@@ -90,7 +94,6 @@ def heatmap_mse_loss(student_heat, teacher_heat):
         student_heat (torch.Tensor): [B, 1, H, W], range [0, 1]
         teacher_heat (torch.Tensor): [B, 1, H, W], range [0, 1]
     """
-    # Ensure shapes match (Student might be slightly different due to padding, though unlikely with 640x480)
     if student_heat.shape != teacher_heat.shape:
         teacher_heat = F.interpolate(
             teacher_heat,
@@ -136,10 +139,7 @@ def superpoint_distill_loss(student_heat, teacher_scores, grid_size=8):
     neg_inds = 1.0 - pos_inds
 
     # Loss Calculation
-    # If teacher says YES: Penalize low prediction
     pos_loss = pos_inds * torch.pow(1 - pred, alpha) * torch.log(pred)
-
-    # If teacher says NO: Penalize high prediction (weighted by distance to actual corner)
     neg_loss = (
         neg_inds
         * torch.pow(1 - t_heat, beta)
@@ -148,24 +148,209 @@ def superpoint_distill_loss(student_heat, teacher_scores, grid_size=8):
     )
 
     loss = -(pos_loss + neg_loss).sum()
-
-    # Normalize by number of positive keypoints
     num_pos = pos_inds.sum()
 
     return loss / (num_pos + 1e-6)
 
 
+# ============================================================================
+# ALIKE DISTILLATION LOSS - XFeat Style Position-Aware Loss
+# ============================================================================
+
+
+def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8):
+    """
+    Distills keypoint positions from teacher heatmap to student's 65-channel logits.
+
+    This loss teaches the student to predict WHICH of the 64 sub-pixel locations
+    within each 8x8 cell contains a keypoint, using the teacher's heatmap as supervision.
+
+    Args:
+        student_logits (torch.Tensor): [65, H/8, W/8] Raw logits from student
+                                        (before softmax and pixel shuffle)
+        teacher_heatmap (torch.Tensor): [1, H, W] Teacher's keypoint heatmap at full resolution
+        grid_size (int): Pixel shuffle factor (default 8)
+
+    Returns:
+        loss (torch.Tensor): Scalar loss value
+        accuracy (float): Classification accuracy (0-1)
+    """
+    C, Hc, Wc = student_logits.shape  # C=65, Hc=H/8, Wc=W/8
+    _, H, W = teacher_heatmap.shape
+
+    # 1. Downsample teacher heatmap to coarse grid [1, H/8, W/8]
+    with torch.no_grad():
+        # Use avg pooling to preserve keypoint strength
+        teacher_coarse = F.avg_pool2d(
+            teacher_heatmap.unsqueeze(0), kernel_size=grid_size, stride=grid_size
+        ).squeeze(0)  # [1, H/8, W/8]
+
+        # Find cells that contain keypoints (threshold)
+        keypoint_mask = teacher_coarse > 0.01  # [1, H/8, W/8]
+        keypoint_mask = keypoint_mask.squeeze(0)  # [H/8, W/8]
+
+    # 2. For each cell with a keypoint, find the peak sub-pixel location
+    with torch.no_grad():
+        # Reshape teacher to [H/8, W/8, 8, 8] to see inside each cell
+        teacher_cells = (
+            teacher_heatmap.view(1, Hc, grid_size, Wc, grid_size)
+            .permute(0, 1, 3, 2, 4)
+            .reshape(Hc, Wc, grid_size * grid_size)
+        )
+
+        # Find peak position within each cell (0-63)
+        peak_positions = teacher_cells.argmax(dim=-1)  # [H/8, W/8]
+
+        # Create labels: Use peak position for keypoint cells, 64 (dustbin) for others
+        labels = torch.where(
+            keypoint_mask,
+            peak_positions,
+            torch.full_like(peak_positions, 64),  # Dustbin channel
+        )  # [H/8, W/8]
+
+    # 3. Compute Cross-Entropy Loss
+    # Reshape logits: [65, H/8, W/8] -> [H/8 * W/8, 65]
+    logits_flat = student_logits.permute(1, 2, 0).reshape(-1, C)
+    labels_flat = labels.reshape(-1)
+
+    # Cross-entropy over 65 classes
+    loss = F.cross_entropy(logits_flat, labels_flat, reduction="mean")
+
+    # 4. Compute Accuracy (only on keypoint cells)
+    with torch.no_grad():
+        predictions = logits_flat.argmax(dim=-1).reshape(Hc, Wc)
+
+        # Accuracy on cells that should have keypoints
+        if keypoint_mask.sum() > 0:
+            correct = (predictions[keypoint_mask] == labels[keypoint_mask]).float()
+            accuracy = correct.mean().item()
+        else:
+            accuracy = 0.0
+
+    return loss, accuracy
+
+
+def batch_alike_distill_loss(student_logits_batch, teacher_heatmap_batch, grid_size=8):
+    """
+    Batch version of alike_distill_loss.
+
+    Args:
+        student_logits_batch (torch.Tensor): [B, 65, H/8, W/8]
+        teacher_heatmap_batch (torch.Tensor): [B, 1, H, W]
+        grid_size (int): Pixel shuffle factor
+
+    Returns:
+        loss (torch.Tensor): Scalar loss
+        accuracy (float): Average accuracy across batch
+    """
+    B = student_logits_batch.shape[0]
+
+    total_loss = 0
+    total_acc = 0
+    valid_count = 0
+
+    for b in range(B):
+        # Process each sample in batch
+        loss, acc = alike_distill_loss(
+            student_logits_batch[b], teacher_heatmap_batch[b], grid_size
+        )
+
+        # Accumulate loss (even for samples without keypoints to train dustbin)
+        total_loss += loss
+        valid_count += 1
+
+        # Only accumulate accuracy if there were keypoints
+        if acc > 0:
+            total_acc += acc
+
+    # Average
+    avg_loss = total_loss / max(valid_count, 1)
+    avg_acc = total_acc / max(valid_count, 1) if valid_count > 0 else 0.0
+
+    return avg_loss, avg_acc
+
+
+def hybrid_heatmap_loss(
+    student_logits, teacher_heatmap, grid_size=8, position_weight=1.0, focal_weight=1.0
+):
+    """
+    Combines position-aware classification loss with focal loss.
+
+    Args:
+        student_logits (torch.Tensor): [B, 65, H/8, W/8] Raw student output
+        teacher_heatmap (torch.Tensor): [B, 1, H, W] Teacher heatmap
+        grid_size (int): Pixel shuffle factor
+        position_weight (float): Weight for position classification loss
+        focal_weight (float): Weight for focal loss
+
+    Returns:
+        loss (torch.Tensor): Combined loss
+        metrics (dict): Dictionary with individual losses and accuracy
+    """
+    # 1. Position Classification Loss (teaches WHERE in each cell)
+    loss_pos, acc = batch_alike_distill_loss(student_logits, teacher_heatmap, grid_size)
+
+    # 2. Focal Loss (teaches soft confidence values)
+    with torch.no_grad():
+        student_probs = F.softmax(student_logits, dim=1)
+        student_corners = student_probs[:, :-1, :, :]  # Remove dustbin
+        student_heatmap = F.pixel_shuffle(student_corners, grid_size)
+
+    loss_focal = superpoint_focal_loss_internal(
+        student_heatmap, teacher_heatmap, grid_size
+    )
+
+    # 3. Combine
+    total_loss = position_weight * loss_pos + focal_weight * loss_focal
+
+    metrics = {
+        "position_loss": loss_pos.item(),
+        "focal_loss": loss_focal.item(),
+        "position_accuracy": acc,
+        "total_loss": total_loss.item(),
+    }
+
+    return total_loss, metrics
+
+
+def superpoint_focal_loss_internal(student_heat, teacher_heat, grid_size=8):
+    """Internal focal loss helper."""
+    pred = torch.clamp(student_heat, min=1e-6, max=1.0 - 1e-6)
+
+    alpha = 2.0
+    beta = 4.0
+
+    pos_inds = teacher_heat.gt(0.01).float()
+    neg_inds = 1.0 - pos_inds
+
+    pos_loss = pos_inds * torch.pow(1 - pred, alpha) * torch.log(pred)
+    neg_loss = (
+        neg_inds
+        * torch.pow(1 - teacher_heat, beta)
+        * torch.pow(pred, alpha)
+        * torch.log(1 - pred)
+    )
+
+    loss = -(pos_loss + neg_loss).sum()
+    num_pos = pos_inds.sum()
+
+    return loss / (num_pos + 1e-6)
+
+
+# ============================================================================
+# OTHER LOSS FUNCTIONS
+# ============================================================================
+
+
 def keypoint_position_loss(kpts1, kpts2, pts1, pts2, softmax_temp=1.0):
     """
-    Computes coordinate classification loss, by re-interpreting the 64 bins to 8x8 grid and optimizing
-    for correct offsets
+    Computes coordinate classification loss.
     """
     C, H, W = kpts1.shape
     kpts1 = kpts1.permute(1, 2, 0) * softmax_temp
     kpts2 = kpts2.permute(1, 2, 0) * softmax_temp
 
     with torch.no_grad():
-        # Generate meshgrid
         x, y = torch.meshgrid(
             torch.arange(W, device=kpts1.device),
             torch.arange(H, device=kpts1.device),
@@ -174,17 +359,14 @@ def keypoint_position_loss(kpts1, kpts2, pts1, pts2, softmax_temp=1.0):
         xy = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1)], dim=-1)
         xy *= 8
 
-        # Generate collision map
         hashmap = (
             torch.ones((H * 8, W * 8, 2), dtype=torch.long, device=kpts1.device) * -1
         )
 
-        # Safe indexing
         p1y = torch.clamp(pts1[:, 1].long(), 0, H * 8 - 1)
         p1x = torch.clamp(pts1[:, 0].long(), 0, W * 8 - 1)
         hashmap[p1y, p1x, :] = pts2.long()
 
-        # Estimate offset of src kpts
         _, kpts1_offsets = kpts1.max(dim=-1)
         kpts1_offsets_x = kpts1_offsets % 8
         kpts1_offsets_y = kpts1_offsets // 8
@@ -193,11 +375,8 @@ def keypoint_position_loss(kpts1, kpts2, pts1, pts2, softmax_temp=1.0):
         )
 
         kpts1_coords = xy + kpts1_offsets_xy
-
-        # find src -> tgt pts
         kpts1_coords = kpts1_coords.view(-1, 2)
 
-        # Check bounds before indexing hashmap
         valid_coords = (
             (kpts1_coords[:, 0] >= 0)
             & (kpts1_coords[:, 0] < W * 8)
@@ -213,10 +392,9 @@ def keypoint_position_loss(kpts1, kpts2, pts1, pts2, softmax_temp=1.0):
         mask_valid = torch.all(gt_12 >= 0, dim=-1)
         gt_12 = gt_12[mask_valid]
 
-        # find offset labels
         labels2 = (gt_12 / 8) - (gt_12 / 8).long()
         labels2 = (labels2 * 8).long()
-        labels2 = labels2[:, 0] + 8 * labels2[:, 1]  # linear index
+        labels2 = labels2[:, 0] + 8 * labels2[:, 1]
 
     p2y = (gt_12[:, 1] / 8).long().clamp(0, H - 1)
     p2x = (gt_12[:, 0] / 8).long().clamp(0, W - 1)
@@ -238,14 +416,9 @@ def keypoint_position_loss(kpts1, kpts2, pts1, pts2, softmax_temp=1.0):
 
 
 def coordinate_classification_loss(coords1, pts1, pts2, conf):
-    """
-    Computes the fine coordinate classification loss.
-    """
-    # Do not backprop coordinate warps
+    """Computes the fine coordinate classification loss."""
     with torch.no_grad():
         coords1_detached = pts1 * 8
-
-        # find offset
         offsets1_detached = (coords1_detached / 8) - (coords1_detached / 8).long()
         offsets1_detached = (offsets1_detached * 8).long()
         labels1 = offsets1_detached[:, 0] + 8 * offsets1_detached[:, 1]
@@ -255,7 +428,6 @@ def coordinate_classification_loss(coords1, pts1, pts2, conf):
     with torch.no_grad():
         predicted = coords1.max(dim=-1)[1]
         acc = labels1 == predicted
-        # Filter by confidence
         mask = conf > 0.1
         if mask.sum() > 0:
             acc = acc[mask].float().mean()
@@ -264,7 +436,6 @@ def coordinate_classification_loss(coords1, pts1, pts2, conf):
 
     loss = F.nll_loss(coords1_log, labels1, reduction="none")
 
-    # Weight loss by confidence
     if conf.sum() > 0:
         conf = conf / conf.sum()
         loss = (loss * conf).sum()
@@ -274,14 +445,32 @@ def coordinate_classification_loss(coords1, pts1, pts2, conf):
     return loss * 2.0, acc
 
 
-def keypoint_loss(heatmap, target):
-    # Compute L1 loss
-    # heatmap: [N], target: [N] (confidence)
-    L1_loss = F.l1_loss(heatmap, target)
-    return L1_loss * 3.0
+def keypoint_loss(reliability_pred, confidence_target):
+    """
+    Improved reliability loss using Binary Cross Entropy.
+
+    Args:
+        reliability_pred (torch.Tensor): [N] Predicted reliability scores (0-1, from sigmoid)
+        confidence_target (torch.Tensor): [N] Target confidence scores (0-1, from dual_softmax)
+
+    Returns:
+        torch.Tensor: Scalar loss value
+    """
+    eps = 1e-6
+    reliability_pred = torch.clamp(reliability_pred, eps, 1.0 - eps)
+    confidence_target = torch.clamp(confidence_target, eps, 1.0 - eps)
+
+    # Binary Cross Entropy
+    bce_loss = -(
+        confidence_target * torch.log(reliability_pred)
+        + (1 - confidence_target) * torch.log(1 - reliability_pred)
+    ).mean()
+
+    return bce_loss * 3.0
 
 
 def hard_triplet_loss(X, Y, margin=0.5):
+    """Hard triplet loss for descriptor learning."""
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
         raise RuntimeError("Error: X and Y shapes must match and be 2D matrices")
 
@@ -290,13 +479,9 @@ def hard_triplet_loss(X, Y, margin=0.5):
 
     eye = torch.eye(dist_mat.size(0), device=dist_mat.device)
     dist_neg = dist_mat + eye * 100.0
-
-    # filter repeated patches on negative distances
     dist_neg = dist_neg + dist_neg.le(0.01).float() * 100.0
 
-    # Margin Ranking Loss
     hard_neg = torch.min(dist_neg, 1)[0]
-
     loss = torch.clamp(margin + dist_pos - hard_neg, min=0.0)
 
     return loss.mean()

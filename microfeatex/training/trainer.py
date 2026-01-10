@@ -110,11 +110,20 @@ class Trainer:
         print(f"Dataset Root: {dataset_root}")
 
         # 3. Models
-        desc_dim = self.config.get("model", {}).get("descriptor_dim", 64)
+        model_conf = self.config.get("model", {})
+        desc_dim = model_conf.get("descriptor_dim", 64)
 
+        width_mult = model_conf.get("width_mult", 1.0)
+        use_depthwise = model_conf.get("use_depthwise", False)
+
+        print(
+            f"🏗️ Building Model: Width={width_mult}, Depthwise={use_depthwise}, Dim={desc_dim}"
+        )
         self.net = EfficientFeatureExtractor(
-            descriptor_dim=desc_dim, binary_bits=256
+            descriptor_dim=desc_dim, width_mult=width_mult, use_depthwise=use_depthwise
         ).to(self.dev)
+
+        self.net.profile()
 
         teacher_type = self.config.get("model", {}).get("teacher", "superpoint")
         self.teacher_type = teacher_type.lower()
@@ -300,18 +309,36 @@ class Trainer:
                         t_logits2 = self.process_teacher_output(
                             t_out2["scores"], target_shape, return_logits=True
                         )
-                        loss_sp1 = losses.superpoint_distill_loss(hmap1, t_logits1)
-                        loss_sp2 = losses.superpoint_distill_loss(hmap2, t_logits2)
+                        from microfeatex.training.losses import batch_alike_distill_loss
 
-                        t_desc1 = t_out1["descriptors"]
-                        t_desc2 = t_out2["descriptors"]
+                        loss_sp1, acc_sp1 = batch_alike_distill_loss(
+                            out1["keypoint_logits"].unsqueeze(0),  # [1, 65, H/8, W/8]
+                            t_out1[
+                                "heatmap"
+                            ],  # Will be generated from logits inside loss
+                            grid_size=8,
+                        )
+                        loss_sp2, acc_sp2 = batch_alike_distill_loss(
+                            out2["keypoint_logits"].unsqueeze(0),
+                            t_out2["heatmap"],
+                            grid_size=8,
+                        )
+                        loss_sp = (loss_sp1 + loss_sp2) / 2.0
+                        acc_sp = (acc_sp1 + acc_sp2) / 2.0
 
+                        # Log position accuracy
+                        if step_counter % 10 == 0:
+                            self.writer.add_scalar(
+                                "Accuracy/keypoint_position", acc_sp, step_counter
+                            )
                     elif self.teacher_type == "alike":
-                        # ALIKE: Heatmap [B, 1, H, W] -> Direct MSE
-                        # Descriptors [B, 64, H/?, W/?] -> Need to match Student [B, 64, H/8, W/8]
-                        loss_sp1 = losses.heatmap_mse_loss(hmap1, t_out1["heatmap"])
-                        loss_sp2 = losses.heatmap_mse_loss(hmap2, t_out2["heatmap"])
-
+                        # We pass the Raw Logits from Student and the Heatmap from Teacher
+                        loss_sp1, _ = losses.batch_alike_distill_loss(
+                            out1["keypoint_logits"], t_out1["heatmap"], grid_size=8
+                        )
+                        loss_sp2, _ = losses.batch_alike_distill_loss(
+                            out2["keypoint_logits"], t_out2["heatmap"], grid_size=8
+                        )
                         # Ensure Descriptors are H/8 for the correspondence loss
                         t_desc1 = t_out1["descriptors"]
                         t_desc2 = t_out2["descriptors"]
@@ -324,7 +351,7 @@ class Trainer:
                                 t_desc2, size=desc2.shape[2:], mode="bilinear"
                             )
 
-                    loss_sp = (loss_sp1 + loss_sp2) / 2.0
+                        loss_sp = (loss_sp1 + loss_sp2) / 2.0
                     # 6. Correspondences
                     h_coarse, w_coarse = p1.shape[-2] // 8, p1.shape[-1] // 8
                     negatives, positives = utils.get_corresponding_pts(
@@ -360,15 +387,30 @@ class Trainer:
                         loss_ds, conf = losses.dual_softmax_loss(m1, m2, temp=0.2)
 
                         # --- Reliability/Keypoint Loss ---
-                        # Sample reliability at coarse feature map resolution
-                        # Reliability is [B, 1, H/8, W/8], same as descriptors
-                        rel1_pred = rel1[b, 0, pts1_y, pts1_x]
-                        rel2_pred = rel2[b, 0, pts2_y, pts2_x]
+                        s_rel1_b = rel1[b]  # Student [1, H/8, W/8]
+                        s_rel2_b = rel2[b]
+                        t_map1_b = t_out1["heatmap"][b]  # Teacher [1, H, W] usually
+                        t_map2_b = t_out2["heatmap"][b]
 
-                        loss_kp = losses.keypoint_loss(
-                            rel1_pred, conf
-                        ) + losses.keypoint_loss(rel2_pred, conf)
+                        # 1. Resize Teacher Map to match Student resolution (H/8)
+                        # This prevents dimension mismatch errors
+                        if s_rel1_b.shape[-2:] != t_map1_b.shape[-2:]:
+                            t_map1_b = F.interpolate(
+                                t_map1_b.unsqueeze(0),
+                                size=s_rel1_b.shape[-2:],
+                                mode="bilinear",
+                                align_corners=False,
+                            ).squeeze(0)
+                            t_map2_b = F.interpolate(
+                                t_map2_b.unsqueeze(0),
+                                size=s_rel2_b.shape[-2:],
+                                mode="bilinear",
+                                align_corners=False,
+                            ).squeeze(0)
 
+                        loss_kp = F.mse_loss(s_rel1_b, t_map1_b) + F.mse_loss(
+                            s_rel2_b, t_map2_b
+                        )
                         # --- Fine / Offset Loss & Accuracy ---
                         # Sample predicted offsets
                         off1_pred = off1[b, :, pts1_y, pts1_x].t()
