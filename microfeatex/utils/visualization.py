@@ -133,7 +133,7 @@ class Visualizer:
         """
         N = min(img1.shape[0], 3)  # Only log first 3 images to save space
 
-        # 1. Process Heatmaps
+        # Process Heatmaps
         s_heat = self.process_heatmap_for_vis(s_heat[:N])
         t_heat = self.process_heatmap_for_vis(t_heat[:N])
 
@@ -141,7 +141,6 @@ class Visualizer:
         s_heat = (s_heat - s_heat.min()) / (s_heat.max() - s_heat.min() + 1e-8)
         t_heat = (t_heat - t_heat.min()) / (t_heat.max() - t_heat.min() + 1e-8)
 
-        # 2. Reliability Map (Visualizing the new XFeat head)
         # Reliability is [B, 1, H/8, W/8], interpolate up
         rel_map = F.interpolate(s_rel[:N], size=img1.shape[2:], mode="bilinear")
 
@@ -150,7 +149,7 @@ class Visualizer:
         t_overlay = self.create_overlay(img1[:N], t_heat)
         rel_overlay = self.create_overlay(img1[:N], rel_map, alpha=0.6)
 
-        # 4. Compute Matches for the first image pair (On-the-fly Matcher)
+        # Compute Matches for the first image pair (On-the-fly Matcher)
         # Simple grid sampling for visualization
         B, C, Hc, Wc = desc1.shape
         match_img = torch.zeros_like(s_overlay[0])

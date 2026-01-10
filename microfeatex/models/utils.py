@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import copy  # <--- Added this
+import copy
 
 
 def count_parameters(model):
@@ -14,12 +14,11 @@ def estimate_flops(model, input_size=(1, 1, 480, 640)):
     """
     device = next(model.parameters()).device
 
-    # 1. Create a copy so we don't modify the actual model
+    # Create a copy so we don't modify the actual model
     # thop adds 'total_ops' and 'total_params' buffers to the model
     model_copy = copy.deepcopy(model)
     dummy_input = torch.randn(*input_size).to(device)
 
-    # 2. Try using THOP (Industry Standard)
     try:
         from thop import profile
 
@@ -31,7 +30,6 @@ def estimate_flops(model, input_size=(1, 1, 480, 640)):
     except Exception as e:
         print(f"Warning: thop failed ({e}). Falling back to hooks.")
 
-    # 3. Fallback: Manual Hook implementation
     total_flops = 0
 
     def conv_flops(module, input, output):

@@ -2,16 +2,12 @@ import sys
 import os
 import torch
 
-# 1. Setup Path to the ALIKE folder
-# The python files (alike.py, alnet.py) are directly inside third_party/ALIKE/
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ALIKE_REPO_PATH = os.path.join(CURRENT_DIR, "ALIKE")
 
 if ALIKE_REPO_PATH not in sys.path:
     sys.path.append(ALIKE_REPO_PATH)
 
-# 2. Import ALike class
-# Now 'import alike' finds 'third_party/ALIKE/alike.py'
 try:
     from alike import ALike
 except ImportError as e:
@@ -22,7 +18,6 @@ except ImportError as e:
     raise
 
 
-# 3. Helper to initialize model
 def get_alike_model(model_name="alike-t", device="cuda", top_k=-1):
     # Config map matching the structure in alike.py
     c_map = {

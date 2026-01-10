@@ -1,30 +1,49 @@
+import argparse
 import sys
-import os
 from pathlib import Path
 
-# Setup Project Root for Imports
+# Fix imports if running as script
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
-# Import the Trainer from the microfeatex package
-from microfeatex.training.trainer import Trainer, parse_arguments
+from microfeatex.training.trainer import Trainer
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="MicroFeatEX Training")
+    parser.add_argument(
+        "--config", type=str, default="config/config.yaml", help="Path to YAML config"
+    )
+    parser.add_argument(
+        "--dataset_root", type=str, default=None, help="Override dataset root"
+    )
+    parser.add_argument(
+        "--ckpt_save_path",
+        type=str,
+        default="checkpoints/",
+        help="Checkpoint directory",
+    )
+    parser.add_argument(
+        "--model_name", type=str, default="microfeatex", help="Name for logs/saves"
+    )
+    parser.add_argument("--device", type=str, default="cuda", help="cuda or cpu")
+    parser.add_argument(
+        "--save_ckpt_every", type=int, default=1000, help="Steps between saves"
+    )
+    return parser.parse_args()
 
 
 def main():
-    # 1. Parse Args
-    args = parse_arguments()
-
-    print(f"Initializing Trainer for {args.model_name}...")
-    print(f"Config: {args.config}")
-
-    # 2. Initialize
+    args = parse_args()
     trainer = Trainer(args)
 
-    # 3. Train
     try:
         trainer.train()
     except KeyboardInterrupt:
-        print("\nTraining interrupted by user.")
+        print("\nTraining interrupted. Saving final state...")
+        trainer._save_checkpoint(
+            trainer.start_step
+        )  # Accessing internal method for safety
         sys.exit(0)
 
 

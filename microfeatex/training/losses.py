@@ -178,7 +178,7 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8):
     C, Hc, Wc = student_logits.shape  # C=65, Hc=H/8, Wc=W/8
     _, H, W = teacher_heatmap.shape
 
-    # 1. Downsample teacher heatmap to coarse grid [1, H/8, W/8]
+    # Downsample teacher heatmap to coarse grid [1, H/8, W/8]
     with torch.no_grad():
         # Use avg pooling to preserve keypoint strength
         teacher_coarse = F.avg_pool2d(
@@ -189,7 +189,7 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8):
         keypoint_mask = teacher_coarse > 0.01  # [1, H/8, W/8]
         keypoint_mask = keypoint_mask.squeeze(0)  # [H/8, W/8]
 
-    # 2. For each cell with a keypoint, find the peak sub-pixel location
+    # For each cell with a keypoint, find the peak sub-pixel location
     with torch.no_grad():
         # Reshape teacher to [H/8, W/8, 8, 8] to see inside each cell
         teacher_cells = (
@@ -208,7 +208,7 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8):
             torch.full_like(peak_positions, 64),  # Dustbin channel
         )  # [H/8, W/8]
 
-    # 3. Compute Cross-Entropy Loss
+    # Compute Cross-Entropy Loss
     # Reshape logits: [65, H/8, W/8] -> [H/8 * W/8, 65]
     logits_flat = student_logits.permute(1, 2, 0).reshape(-1, C)
     labels_flat = labels.reshape(-1)
@@ -216,7 +216,7 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8):
     # Cross-entropy over 65 classes
     loss = F.cross_entropy(logits_flat, labels_flat, reduction="mean")
 
-    # 4. Compute Accuracy (only on keypoint cells)
+    # Compute Accuracy (only on keypoint cells)
     with torch.no_grad():
         predictions = logits_flat.argmax(dim=-1).reshape(Hc, Wc)
 
@@ -287,10 +287,10 @@ def hybrid_heatmap_loss(
         loss (torch.Tensor): Combined loss
         metrics (dict): Dictionary with individual losses and accuracy
     """
-    # 1. Position Classification Loss (teaches WHERE in each cell)
+    # Position Classification Loss (teaches WHERE in each cell)
     loss_pos, acc = batch_alike_distill_loss(student_logits, teacher_heatmap, grid_size)
 
-    # 2. Focal Loss (teaches soft confidence values)
+    # Focal Loss (teaches soft confidence values)
     with torch.no_grad():
         student_probs = F.softmax(student_logits, dim=1)
         student_corners = student_probs[:, :-1, :, :]  # Remove dustbin
@@ -300,7 +300,7 @@ def hybrid_heatmap_loss(
         student_heatmap, teacher_heatmap, grid_size
     )
 
-    # 3. Combine
+    # Combine
     total_loss = position_weight * loss_pos + focal_weight * loss_focal
 
     metrics = {

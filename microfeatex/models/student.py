@@ -43,7 +43,7 @@ class ConvBlock(nn.Module):
                 nn.ReLU6(inplace=True),
             )
         else:
-            # Standard Conv (Your original BasicLayer)
+            # Standard Conv (BasicLayer)
             self.net = nn.Sequential(
                 nn.Conv2d(in_c, out_c, kernel_size, stride, padding, bias=False),
                 nn.BatchNorm2d(out_c),

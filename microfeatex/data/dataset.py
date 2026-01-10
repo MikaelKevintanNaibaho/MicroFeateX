@@ -15,7 +15,7 @@ class Dataset(Dataset):
             root_dir (str): Path to the dataset root (from config).
             config (dict): Configuration dictionary.
         """
-        # 1. Recursive Search
+        # Recursive Search
         # Uses 'recursive=True' with '**' to search all subdirectories
         # Matches .jpg, .jpeg, and .png
         patterns = [
@@ -38,7 +38,7 @@ class Dataset(Dataset):
 
         print(f"Dataset: Found {len(self.files)} images in {root_dir}")
 
-        # 2. Get Resize Shape from Config
+        # Get Resize Shape from Config
         self.resize_shape = tuple(config["augmentation"]["warp_resolution"])  # (W, H)
 
     def __len__(self):

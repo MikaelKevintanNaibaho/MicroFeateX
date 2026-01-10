@@ -21,23 +21,23 @@ def generate_random_homography(shape, difficulty=0.3):
     """
     h, w = shape
 
-    # 1. Random In-plane Rotation
+    # Random In-plane Rotation
     theta = np.radians(np.random.uniform(-30, 30))
     c, s = np.cos(theta), np.sin(theta)
 
-    # 2. Random Scale
+    #  Random Scale
     scale_x, scale_y = np.random.uniform(0.35, 1.2, 2)
 
-    # 3. Random Translation
+    # Random Translation
     # Translation to center
     tx, ty = -w / 2.0, -h / 2.0
     # Random offset
     txn, tyn = np.random.normal(0, 120.0 * difficulty, 2)
 
-    # 4. Affine Shear
+    # Affine Shear
     sx, sy = np.random.normal(0, 0.6 * difficulty, 2)
 
-    # 5. Projective
+    # Projective
     p1, p2 = np.random.normal(0, 0.006 * difficulty, 2)
 
     # Compose Matrices
@@ -156,7 +156,7 @@ class AugmentationPipe(nn.Module):
         B, C, H, W = x.shape
         difficulty = self.difficulty if self.enable_geom else 0.0
 
-        # --- 1. Geometric: Homography ---
+        # --- Geometric: Homography ---
         H_list = [
             torch.from_numpy(generate_random_homography((H, W), difficulty)).float()
             for _ in range(B)
@@ -166,12 +166,12 @@ class AugmentationPipe(nn.Module):
         # Warp entire image first
         img2_full = G.warp_perspective(x, H_mat, dsize=(H, W), padding_mode="zeros")
 
-        # --- 2. Crop to Remove Borders ---
+        # --- Crop to Remove Borders ---
         # "Zoom in" to central region to avoid sampling pure black borders
         img1 = x[..., self.low_h : self.high_h, self.low_w : self.high_w]
         img2 = img2_full[..., self.low_h : self.high_h, self.low_w : self.high_w]
 
-        # --- 3. Geometric: TPS (Optional) ---
+        # --- Geometric: TPS ---
         if self.use_tps and self.enable_geom:
             src_list, w_list, A_list = [], [], []
             curr_h, curr_w = img2.shape[2], img2.shape[3]
@@ -188,8 +188,7 @@ class AugmentationPipe(nn.Module):
                 img2, torch.cat(src_list), torch.cat(w_list), torch.cat(A_list)
             )
 
-        # --- 4. Resize to Output Resolution ---
-        # Note: XFeat uses nearest for some steps, but bilinear is safer for gradients/smoothness
+        # --- Resize to Output Resolution ---
         img1 = F.interpolate(
             img1, size=self.out_res[::-1], mode="bilinear", align_corners=False
         )
@@ -197,20 +196,18 @@ class AugmentationPipe(nn.Module):
             img2, size=self.out_res[::-1], mode="bilinear", align_corners=False
         )
 
-        # --- 5. Valid Pixel Mask & Texture Filling ---
+        # --- Valid Pixel Mask & Texture Filling ---
         # Create mask where pixels are valid (non-zero)
         mask = ~torch.all(img2 == 0, dim=1, keepdim=True)  # [B, 1, H, W]
         mask_expanded = mask.expand(-1, C, -1, -1)
 
-        # Fill invalid regions (black borders) with texture from other images in batch
-        # This prevents the network from learning "black border = fake"
         roll_idx = 2 if self.use_tps else 1
         background = torch.roll(img1, roll_idx, dims=0)
         img2 = torch.where(mask_expanded, img2, background)
 
         mask = mask.squeeze(1).float()  # Return as float mask [B, H, W]
 
-        # --- 6. Photometric Augmentation ---
+        # --- Photometric Augmentation ---
         if self.enable_photo:
             # Expand grayscale to RGB for Augmentations if needed
             is_gray = C == 1
@@ -264,10 +261,10 @@ class AugmentationPipe(nn.Module):
         Returns:
             [N, 2] Keypoints in Target Output (Final) coordinates
         """
-        # FIX: Ensure H and pts are on the same device
+        # Ensure H and pts are on the same device
         H = H.to(pts.device)
 
-        # 1. Project Source Points back to Crop Coordinates
+        # Project Source Points back to Crop Coordinates
         # Scale factor: Output -> Crop
         crop_h = self.high_h - self.low_h
         crop_w = self.high_w - self.low_w
@@ -280,14 +277,14 @@ class AugmentationPipe(nn.Module):
         # Scale up and add offset (Output -> Original Large Coords)
         pts_orig = (pts * scale) + offset
 
-        # 2. Apply Homography
+        # Apply Homography
         pts_homo = torch.cat(
             [pts_orig, torch.ones(pts.shape[0], 1, device=pts.device)], dim=1
         )
         pts_warped = (H @ pts_homo.T).T
         pts_warped = pts_warped[:, :2] / (pts_warped[:, 2:3] + 1e-8)
 
-        # 3. Project Target Points to Output Coordinates
+        # Project Target Points to Output Coordinates
         pts_final = (pts_warped - offset) / scale
 
         return pts_final
