@@ -82,6 +82,26 @@ def fine_loss(f1, f2, pts1, pts2, fine_module, ws=7):
     return error
 
 
+def heatmap_mse_loss(student_heat, teacher_heat):
+    """
+    Computes MSE loss between the student's predicted heatmap and the teacher's target heatmap.
+
+    Args:
+        student_heat (torch.Tensor): [B, 1, H, W], range [0, 1]
+        teacher_heat (torch.Tensor): [B, 1, H, W], range [0, 1]
+    """
+    # Ensure shapes match (Student might be slightly different due to padding, though unlikely with 640x480)
+    if student_heat.shape != teacher_heat.shape:
+        teacher_heat = F.interpolate(
+            teacher_heat,
+            size=student_heat.shape[2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+    return F.mse_loss(student_heat, teacher_heat)
+
+
 def superpoint_distill_loss(student_heat, teacher_scores, grid_size=8):
     """
     Distills the heatmap from the SuperPoint teacher to the student using Focal Loss.

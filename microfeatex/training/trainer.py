@@ -16,6 +16,7 @@ from torch.amp import autocast, GradScaler
 import numpy as np
 
 from microfeatex.models.student import EfficientFeatureExtractor
+from microfeatex.models.alike_teacher import AlikeTeacher
 from microfeatex.models.teacher import SuperPointTeacher
 from microfeatex.data.augmentation import AugmentationPipe
 from microfeatex.data.dataset import Dataset
@@ -109,13 +110,29 @@ class Trainer:
         print(f"Dataset Root: {dataset_root}")
 
         # 3. Models
-        self.net = EfficientFeatureExtractor(descriptor_dim=64, binary_bits=256).to(
-            self.dev
-        )
+        desc_dim = self.config.get("model", {}).get("descriptor_dim", 64)
 
-        print(f"Loading SuperPoint Teacher...")
-        sp_weights = paths_conf.get("superpoint_weights", "dataset/superpoint_v1.pth")
-        self.teacher = SuperPointTeacher(weights_path=sp_weights, device=str(self.dev))
+        self.net = EfficientFeatureExtractor(
+            descriptor_dim=desc_dim, binary_bits=256
+        ).to(self.dev)
+
+        teacher_type = self.config.get("model", {}).get("teacher", "superpoint")
+        self.teacher_type = teacher_type.lower()
+
+        if self.teacher_type == "alike":
+            print(f"Loading ALIKE Teacher (Dim: {desc_dim})...")
+            # ALIKE-T/S/N/L options. Default to alike-t.
+            alike_model = self.config.get("model", {}).get("alike_model", "alike-t")
+            self.teacher = AlikeTeacher(model_name=alike_model, device=str(self.dev))
+        else:
+            print(f"Loading SuperPoint Teacher (Dim: {desc_dim})...")
+            sp_weights = paths_conf.get(
+                "superpoint_weights", "dataset/superpoint_v1.pth"
+            )
+            self.teacher = SuperPointTeacher(
+                weights_path=sp_weights, device=str(self.dev)
+            )
+
         self.teacher.eval()
 
         # 4. Optimization
@@ -151,7 +168,11 @@ class Trainer:
         log_path = os.path.join(
             log_dir, f"{args.model_name}_{time.strftime('%Y_%m_%d-%H_%M_%S')}"
         )
-        self.vis = Visualizer(log_dir=log_path)
+
+        vis_config = self.config.get("visualization", {})
+        cmap_name = vis_config.get("colormap", "jet")
+
+        self.vis = Visualizer(log_dir=log_path, colormap_name=cmap_name)
         self.writer = self.vis.writer
 
         self.steps = args.n_steps
@@ -264,25 +285,46 @@ class Trainer:
                         out2["offset"],
                     )
                     # 4. Forward Pass (Teacher)
-                    with torch.no_grad():
-                        t_out1 = self.teacher(p1)
-                        t_out2 = self.teacher(p2)
+                    with torch.no_grad(), autocast("cuda", enabled=False):
+                        # Ensure input is float32
+                        t_out1 = self.teacher(p1.float())
+                        t_out2 = self.teacher(p2.float())
 
                     target_shape = p1.shape[2:]
 
-                    # 1. Get Clean Coarse LOGITS for the Loss function
-                    # return_logits=True means we get [B, 65, 60, 80]
-                    t_logits1 = self.process_teacher_output(
-                        t_out1["scores"], target_shape, return_logits=True
-                    )
-                    t_logits2 = self.process_teacher_output(
-                        t_out2["scores"], target_shape, return_logits=True
-                    )
-                    # 5. Distillation Loss (Dense)
-                    loss_sp1 = losses.superpoint_distill_loss(hmap1, t_logits1)
-                    loss_sp2 = losses.superpoint_distill_loss(hmap2, t_logits2)
-                    loss_sp = (loss_sp1 + loss_sp2) / 2.0
+                    if self.teacher_type == "superpoint":
+                        # SuperPoint: Logits [B, 65, H/8, W/8] -> Loss Function handles pixel shuffle
+                        t_logits1 = self.process_teacher_output(
+                            t_out1["scores"], target_shape, return_logits=True
+                        )
+                        t_logits2 = self.process_teacher_output(
+                            t_out2["scores"], target_shape, return_logits=True
+                        )
+                        loss_sp1 = losses.superpoint_distill_loss(hmap1, t_logits1)
+                        loss_sp2 = losses.superpoint_distill_loss(hmap2, t_logits2)
 
+                        t_desc1 = t_out1["descriptors"]
+                        t_desc2 = t_out2["descriptors"]
+
+                    elif self.teacher_type == "alike":
+                        # ALIKE: Heatmap [B, 1, H, W] -> Direct MSE
+                        # Descriptors [B, 64, H/?, W/?] -> Need to match Student [B, 64, H/8, W/8]
+                        loss_sp1 = losses.heatmap_mse_loss(hmap1, t_out1["heatmap"])
+                        loss_sp2 = losses.heatmap_mse_loss(hmap2, t_out2["heatmap"])
+
+                        # Ensure Descriptors are H/8 for the correspondence loss
+                        t_desc1 = t_out1["descriptors"]
+                        t_desc2 = t_out2["descriptors"]
+
+                        if t_desc1.shape[-1] != desc1.shape[-1]:
+                            t_desc1 = F.interpolate(
+                                t_desc1, size=desc1.shape[2:], mode="bilinear"
+                            )
+                            t_desc2 = F.interpolate(
+                                t_desc2, size=desc2.shape[2:], mode="bilinear"
+                            )
+
+                    loss_sp = (loss_sp1 + loss_sp2) / 2.0
                     # 6. Correspondences
                     h_coarse, w_coarse = p1.shape[-2] // 8, p1.shape[-1] // 8
                     negatives, positives = utils.get_corresponding_pts(
@@ -429,9 +471,15 @@ class Trainer:
                         self.scheduler.step()
 
                 if step_counter % 500 == 0:
-                    vis_t_heat = self.process_teacher_output(
-                        t_out1["scores"], target_shape, return_logits=False
-                    )
+                    # Handle Teacher Visualization based on type
+                    if self.teacher_type == "superpoint":
+                        # SuperPoint: Needs conversion from logits -> heatmap
+                        vis_t_heat = self.process_teacher_output(
+                            t_out1["scores"], target_shape, return_logits=False
+                        )
+                    else:
+                        # ALIKE: Already returns a standard heatmap [B, 1, H, W]
+                        vis_t_heat = t_out1["heatmap"]
                     self.vis.log_advanced_visuals(
                         step=step_counter,
                         img1=p1,

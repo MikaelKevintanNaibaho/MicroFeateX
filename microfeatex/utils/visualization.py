@@ -6,9 +6,33 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 
 
+# Define available colormaps
+COLORMAPS = {
+    "jet": cv2.COLORMAP_JET,
+    "inferno": cv2.COLORMAP_INFERNO,
+    "turbo": cv2.COLORMAP_TURBO,
+    "hot": cv2.COLORMAP_HOT,
+    "bone": cv2.COLORMAP_BONE,
+    "ocean": cv2.COLORMAP_OCEAN,
+    "viridis": cv2.COLORMAP_VIRIDIS,
+    "plasma": cv2.COLORMAP_PLASMA,
+    "magma": cv2.COLORMAP_MAGMA,
+    "cividis": cv2.COLORMAP_CIVIDIS,
+}
+
+
 class Visualizer:
-    def __init__(self, log_dir):
+    def __init__(self, log_dir, colormap_name="jet"):
         self.writer = SummaryWriter(log_dir=log_dir)
+
+        self.colormap_name = colormap_name.lower()
+        if self.colormap_name not in COLORMAPS:
+            print(
+                f"Warming: Colormap '{colormap_name}' not, found. Defaulting to 'jet,'"
+            )
+            self.colormap_name = "jet"
+
+        self.cv2_colormap = COLORMAPS[self.colormap_name]
 
     def close(self):
         self.writer.close()
@@ -19,7 +43,7 @@ class Visualizer:
                 v = v.item()
             self.writer.add_scalar(f"{prefix}/{k}", v, step)
 
-    def apply_colormap(self, heatmap, colormap="jet"):
+    def apply_colormap(self, heatmap):
         """Apply colormap to grayscale heatmap [B, 1, H, W] -> [B, 3, H, W]"""
         B, C, H, W = heatmap.shape
         heatmap_np = heatmap.detach().cpu().numpy()
@@ -33,7 +57,7 @@ class Visualizer:
             h_img = (h_img * 255).astype(np.uint8)
 
             # Apply OpenCV colormap
-            c_img = cv2.applyColorMap(h_img, cv2.COLORMAP_JET)
+            c_img = cv2.applyColorMap(h_img, self.cv2_colormap)
             c_img = cv2.cvtColor(c_img, cv2.COLOR_BGR2RGB)  # OpenCV is BGR
 
             # To Tensor [3, H, W]
