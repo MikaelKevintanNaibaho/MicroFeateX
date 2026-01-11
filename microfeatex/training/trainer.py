@@ -3,6 +3,7 @@ import time
 import tqdm
 import torch
 import torch.optim as optim
+from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 
 from torch.amp import autocast, GradScaler
@@ -17,6 +18,7 @@ from microfeatex.data.dataset import Dataset
 from microfeatex.utils.visualization import Visualizer
 from microfeatex.utils.config import load_config, setup_logging_dir, seed_everything
 from microfeatex.training.criterion import MicroFeatEXCriterion
+from microfeatex.training.scheduler import HyperParamScheduler
 from microfeatex.training import utils, losses
 
 
@@ -52,8 +54,50 @@ class Trainer:
         self.current_epoch = 0
         self.total_steps = self.config.get("training", {}).get("n_steps", 160000)
 
+        self.hp_scheduler = HyperParamScheduler(self.total_steps)
+
+        # Initial Hyperparams (Defaults)
+        self.hp = {
+            "conf_thresh": 0.0,
+            "w_fine": 0.0,
+        }
+
         # Resume
         self._load_checkpoint()
+
+    def _update_hyperparameters(self, step):
+        """
+        Centralized control for all dynamic training parameters.
+        Adjust these ranges based on your preference!
+        """
+        sched_cfg = self.config.get("training", {}).get("scheduler", {})
+        # 1. Confidence Threshold Scheduler
+        conf_cfg = sched_cfg.get("conf_thresh", {})
+        self.hp["conf_thresh"] = self.hp_scheduler.get_value(
+            step,
+            start_val=conf_cfg.get("start_val", 0.0),
+            end_val=conf_cfg.get("end_val", 0.15),
+            start_step_pct=conf_cfg.get("start_pct", 0.0),
+            end_step_pct=conf_cfg.get("end_pct", 0.5),
+        )
+
+        # 2. Fine Loss Scheduler
+        # Target weight comes from the standard loss_weights config
+        fine_cfg = sched_cfg.get("fine_loss", {})
+        w_fine_target = (
+            self.config.get("training", {}).get("loss_weights", {}).get("fine", 1.0)
+        )
+
+        current_w_fine = self.hp_scheduler.get_value(
+            step,
+            start_val=0.0,
+            end_val=w_fine_target,
+            start_step_pct=fine_cfg.get("start_pct", 0.2),
+            end_step_pct=fine_cfg.get("end_pct", 0.4),
+        )
+
+        self.criterion.w_fine = current_w_fine
+        self.hp["w_fine"] = current_w_fine
 
     def _build_data(self):
         """Initializes DataLoaders."""
@@ -110,8 +154,22 @@ class Trainer:
         lr = train_conf.get("lr", 3e-4)
 
         self.optimizer = optim.Adam(self.student.parameters(), lr=lr)
-        self.scheduler = optim.lr_scheduler.StepLR(
+        # --- 1. Warmup Scheduler ---
+        # Linearly increases LR from (lr * 0.1) to (lr) over the first 5000 steps
+        warmup = LinearLR(self.optimizer, start_factor=0.1, total_iters=5000)
+
+        # --- 2. Main Scheduler (Step Decay) ---
+        # Decays LR by 0.5 every 30,000 steps
+        # Note: This takes over AFTER step 5000.
+        main_scheduler = optim.lr_scheduler.StepLR(
             self.optimizer, step_size=30000, gamma=0.5
+        )
+
+        # --- 3. Sequential Combination ---
+        # Steps 0 -> 5000: Use Warmup
+        # Steps 5000+: Use Main Scheduler
+        self.scheduler = SequentialLR(
+            self.optimizer, schedulers=[warmup, main_scheduler], milestones=[5000]
         )
         self.scaler = GradScaler("cuda")
 
@@ -142,11 +200,16 @@ class Trainer:
             self.start_step = ckpt["step"] + 1
             self.current_epoch = ckpt.get("epoch", 0)
 
-    def _train_step(self, batch):
+    # -------------------------------------------------------------------------
+    # UPDATED: Added 'step' argument to enable logging inside the loop
+    # -------------------------------------------------------------------------
+    def _train_step(self, batch, step):
         """
         Executes one training iteration.
         Returns loss dictionary and metrics.
         """
+
+        CONFIDENCE_THRESH = self.hp["conf_thresh"]
         with autocast("cuda"):
             # Augmentation
             p1, p2, H1, H2 = utils.make_batch(
@@ -182,28 +245,35 @@ class Trainer:
             if "heatmap" in t_out1:
                 t_map1_batch = t_out1["heatmap"]
                 t_map2_batch = t_out2["heatmap"]
-
-                # Resize if needed (e.g. ALIKE returns full res, Student uses H/8 for reliability)
-                if t_map1_batch.shape[-2:] != rel1_shape:
-                    t_map1_batch = F.interpolate(
-                        t_map1_batch,
-                        size=rel1_shape,
-                        mode="bilinear",
-                        align_corners=False,
-                    )
-                    t_map2_batch = F.interpolate(
-                        t_map2_batch,
-                        size=rel1_shape,
-                        mode="bilinear",
-                        align_corners=False,
-                    )
             else:
-                # Fallback for SuperPoint if heatmap isn't pre-generated
-                # (Ideally criterion handles this, but reliability loss needs it here)
-                # Create dummy or handle SP conversion if needed.
-                # For now assuming ALIKE or SP wrapper provides heatmap.
-                t_map1_batch = out1["reliability"].detach()  # No-op placeholder
-                t_map2_batch = out2["reliability"].detach()
+                # SuperPoint Teacher returns 'scores' (65-ch logits).
+                # We must convert this to a spatial heatmap [B, 1, H, W]
+                with torch.no_grad():
+                    # 1. Softmax to get probabilities
+                    t_probs1 = F.softmax(t_out1["scores"], dim=1)
+                    t_probs2 = F.softmax(t_out2["scores"], dim=1)
+
+                    # 2. Drop the 65th "dustbin" channel (no keypoint)
+                    # 3. Pixel Shuffle: [B, 64, H/8, W/8] -> [B, 1, H, W]
+                    t_map1_batch = F.pixel_shuffle(t_probs1[:, :-1, :, :], 8)
+                    t_map2_batch = F.pixel_shuffle(t_probs2[:, :-1, :, :], 8)
+
+            # Resize to match Student's Reliability Head resolution (e.g. H/8)
+            # This is critical because SuperPoint/ALIKE heatmaps are HxW (Full Res),
+            # but your Student predicts reliability at H/8xW/8.
+            if t_map1_batch.shape[-2:] != rel1_shape:
+                t_map1_batch = F.interpolate(
+                    t_map1_batch,
+                    size=rel1_shape,
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                t_map2_batch = F.interpolate(
+                    t_map2_batch,
+                    size=rel1_shape,
+                    mode="bilinear",
+                    align_corners=False,
+                )
 
             batch_stats = {
                 "loss_ds": [],
@@ -227,6 +297,12 @@ class Trainer:
                 # Extract Coordinates
                 pts1, pts2 = positives[b][:, :2], positives[b][:, 2:]
 
+                # --- Reliability Loss (Keep this dense or semi-dense) ---
+                # We use the interpolated teacher map we prepared earlier
+                t_map1_b = t_map1_batch[b]
+                t_map2_b = t_map2_batch[b]
+                l_kp = F.mse_loss(rel1[b], t_map1_b) + F.mse_loss(rel2[b], t_map2_b)
+
                 # --- Descriptor Loss ---
                 # Safe indexing
                 pts1_y = pts1[:, 1].long().clamp(0, desc1.shape[2] - 1)
@@ -234,24 +310,49 @@ class Trainer:
                 pts2_y = pts2[:, 1].long().clamp(0, desc2.shape[2] - 1)
                 pts2_x = pts2[:, 0].long().clamp(0, desc2.shape[3] - 1)
 
+                # Get Teacher (or Student) confidence at these specific points
+                # We check if the point in View 1 is "interesting" according to the teacher
+                score_1 = t_map1_b[0, pts1_y, pts1_x]
+                valid_mask = score_1 > CONFIDENCE_THRESH
+
+                # ----------------------------------------------------------------
+                # LOGGING: Added Debug Logic Here
+                # ----------------------------------------------------------------
+                if step % 100 == 0 and b == 0:  # Log first batch every 100 steps
+                    self.writer.add_scalar(
+                        "debug/num_valid_pts", valid_mask.sum().item(), step
+                    )
+                    self.writer.add_scalar("debug/total_pts", len(pts1), step)
+                    self.writer.add_scalar(
+                        "debug/filter_ratio", valid_mask.float().mean().item(), step
+                    )
+                # ----------------------------------------------------------------
+
+                # If too few points remain, skip descriptor loss for this batch item
+                if valid_mask.sum() < 8:  # Minimum points to form a batch
+                    # Only accumulate reliability loss
+                    batch_stats["loss_kp"].append(l_kp)
+                    # Add dummy zeros for others to avoid statistics errors or handle gracefully
+                    continue
+
+                # Filter coordinates and descriptors
+                pts1_y, pts1_x = pts1_y[valid_mask], pts1_x[valid_mask]
+                pts2_y, pts2_x = pts2_y[valid_mask], pts2_x[valid_mask]
+
                 m1 = desc1[b, :, pts1_y, pts1_x].t()
                 m2 = desc2[b, :, pts2_y, pts2_x].t()
-                m1 = F.normalize(m1, dim=1)
-                m2 = F.normalize(m2, dim=1)
                 l_ds, _ = losses.dual_softmax_loss(m1, m2, temp=0.2)
 
-                # --- Reliability Loss ---
-                # Now using the pre-interpolated batch maps
-                t_map1_b = t_map1_batch[b]
-                t_map2_b = t_map2_batch[b]
-
-                l_kp = F.mse_loss(rel1[b], t_map1_b) + F.mse_loss(rel2[b], t_map2_b)
-
-                # --- Fine / Offset Loss ---
+                # --- Fine / Offset Loss (filtered) ---
                 off1_pred = off1[b, :, pts1_y, pts1_x].t()
                 off2_pred = off2[b, :, pts2_y, pts2_x].t()
-                off1_tgt = pts1 - (pts1.long().float() + 0.5)
-                off2_tgt = pts2 - (pts2.long().float() + 0.5)
+
+                # Recalculate targets for filtered points
+                pts1_filtered = pts1[valid_mask]
+                pts2_filtered = pts2[valid_mask]
+
+                off1_tgt = pts1_filtered - (pts1_filtered.long().float() + 0.5)
+                off2_tgt = pts2_filtered - (pts2_filtered.long().float() + 0.5)
 
                 l_fine = F.l1_loss(off1_pred, off1_tgt) + F.l1_loss(off2_pred, off2_tgt)
 
@@ -273,17 +374,26 @@ class Trainer:
                 l_kp = torch.stack(batch_stats["loss_kp"]).mean()
                 l_fine = torch.stack(batch_stats["loss_fine"]).mean()
 
-                total_loss = (
-                    (self.criterion.w_distill * l_ds)
-                    + (self.criterion.w_reliability * l_kp)
-                    + (self.criterion.w_heatmap * loss_sp)
-                    + (self.criterion.w_fine * l_fine)
-                )
+                # Calculate Weighted Components
+                w_ds = l_ds * self.criterion.w_distill
+                w_kp = l_kp * self.criterion.w_reliability
+                w_sp = loss_sp * self.criterion.w_heatmap
+                w_fine = l_fine * self.criterion.w_fine
+
+                # Total Loss (Sum of weighted)
+                total_loss = w_ds + w_kp + w_sp + w_fine
+
                 metrics = {
                     "loss/total": total_loss.item(),
                     "loss/coarse": l_ds.item(),
                     "loss/fine": l_fine.item(),
                     "loss/heatmap": loss_sp.item(),
+                    # --- Weighted Losses (Contribution to Gradient) ---
+                    # Use these to check if a loss is disabled (should be 0.0)
+                    "loss/weighted/coarse": w_ds.item(),
+                    "loss/weighted/fine": w_fine.item(),
+                    "loss/weighted/reliability": w_kp.item(),
+                    "loss/weighted/heatmap": w_sp.item(),
                     "acc/coarse": sum(batch_stats["acc_coarse"]) / valid_batches,
                     "acc/fine": sum(batch_stats["acc_fine"]) / valid_batches,
                     "acc/heatmap": acc_sp,
@@ -314,13 +424,20 @@ class Trainer:
                     iterator = iter(self.train_loader)
                     batch = next(iterator)
 
+                self._update_hyperparameters(step)
                 # Optimization Step
                 self.optimizer.zero_grad()
-                loss, metrics, vis_data = self._train_step(batch)
+
+                # UPDATED: Pass 'step' to _train_step
+                loss, metrics, vis_data = self._train_step(batch, step)
 
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.student.parameters(), 1.0
+                )
+                if step % 100 == 0:
+                    self.writer.add_scalar("debug/grad_norm", grad_norm, step)
 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -334,6 +451,11 @@ class Trainer:
                     for k, v in metrics.items():
                         self.writer.add_scalar(k, v, step)
 
+                if step % 100 == 0:
+                    self.writer.add_scalar(
+                        "params/conf_thresh", self.hp["conf_thresh"], step
+                    )
+                    self.writer.add_scalar("params/w_fine", self.hp["w_fine"], step)
                 # Visualization
                 if step % 500 == 0:
                     p1, p2, out1, t_out1 = vis_data

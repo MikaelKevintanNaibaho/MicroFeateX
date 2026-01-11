@@ -21,9 +21,8 @@ def make_batch(augmentor, images, difficulty=0.3):
         H1: (Identity Matrix, Mask1) for View 1
         H2: (Homography, Mask2) for View 2 (or tuple with TPS params if available)
     """
-    # AugmentationPipe.forward(x) -> img1, img2, H_mat, mask
-    # We assume img1 is the "Identity" view (just cropped/resized) and img2 is the warped view.
-    p1, p2, H_mat, mask2 = augmentor(images)
+    # Unpack the new 5-element tuple from augmentor
+    p1, p2, H_mat, mask2, coords_map = augmentor(images)
 
     B = p1.shape[0]
     dev = p1.device
@@ -31,13 +30,11 @@ def make_batch(augmentor, images, difficulty=0.3):
     # H1 is Identity because p1 is the canonical view (just cropped)
     H_identity = torch.eye(3, device=dev).unsqueeze(0).repeat(B, 1, 1)
     mask1 = torch.ones_like(mask2)  # p1 is fully valid
-
     H1 = (H_identity, mask1)
 
-    # H2 is the Homography/Warp params
-    # Note: If AugmentationPipe returns TPS params, we would pack them here.
-    # Currently assuming H_mat and mask2.
-    H2 = (H_mat, mask2)
+    # Pack the Coordinate Map into H2
+    # This map contains the Dense Flow: img2 pixel -> img1 coordinate
+    H2 = (H_mat, mask2, coords_map)
 
     return p1, p2, H1, H2
 
@@ -79,7 +76,7 @@ def plot_corrs(p1, p2, src_pts, tgt_pts):
 
 def get_corresponding_pts(p1, p2, H1_struct, H2_struct, augmentor, h, w, crop=None):
     """
-    Get dense corresponding points between p1 and p2.
+    Get dense corresponding points between p1 and p2 using precompute coordinate map.
     """
     global debug_cnt
     negatives, positives = [], []
@@ -87,139 +84,126 @@ def get_corresponding_pts(p1, p2, H1_struct, H2_struct, augmentor, h, w, crop=No
     with torch.no_grad():
         # real input res of samples
         rh, rw = p1.shape[-2:]
-        ratio = torch.tensor([rw / w, rh / h], device=p1.device)
 
-        # Unpack Structures
+        # Feature map scaling ratio (e.g /8)
+        ratio_x = rw / w
+        ratio_y = rh / h
+
+        # Unpack
         (H1, mask1) = H1_struct
+        (H_mat, mask2, coords_map) = H2_struct  # Here is our dense map [B, 2, H, W]
 
-        # Handle cases where H2 might have TPS params or just Homography
-        if len(H2_struct) == 5:
-            (H2, src_tps, W_tps, A_tps, mask2) = H2_struct
-            is_tps = True
-        else:
-            (H2, mask2) = H2_struct
-            is_tps = False
-
-        # Generate meshgrid of target pts
+        # Generate meshgrid for Target Image (View 2) features
+        # We want to find matches for every grid cell in the feature map
         x, y = torch.meshgrid(
             torch.arange(w, device=p1.device),
             torch.arange(h, device=p1.device),
             indexing="xy",
         )
-        mesh = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1)], dim=-1)
-        target_pts = mesh.view(-1, 2) * ratio  # Scale to image resolution
 
-        # Pack all transformations into T
+        # Target points in Feature Grid coordinates
+        tgt_grid_flat = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1)], dim=-1).view(
+            -1, 2
+        )
+
+        # Target points in Image coordinates (center of the receptive field)
+        # Note: (x + 0.5) * ratio puts us in the center of the patch
+        tgt_img_pts = (tgt_grid_flat + 0.5) * torch.tensor(
+            [ratio_x, ratio_y], device=p1.device
+        )
+
+        # We need integer indices to look up the Coordinate Map
+        # We simply sample the coordinate map at the center of the patches
+        sample_x = tgt_img_pts[:, 0].long().clamp(0, rw - 1)
+        sample_y = tgt_img_pts[:, 1].long().clamp(0, rh - 1)
+
         for batch_idx in range(len(p1)):
-            with torch.no_grad():
-                # We need to map FROM target (p2) TO source (p1)
-                # p2 = H * p1  =>  p1 = H_inv * p2
+            # 1. Look up correspondences
+            # coords_map contains [X, Y] coordinates of View 1
+            # shape: [B, 2, H, W]
 
-                # If using simple Homography:
-                if not is_tps:
-                    # FIX: Use augmentor.warp_points which handles the transformation correctly
-                    # We need inverse mapping: target -> source
-                    # So we invert H2 and pass it to warp_points
-                    H_inv = torch.inverse(H2[batch_idx])
+            # Get the map for this batch
+            map_b = coords_map[batch_idx]  # [2, H, W]
 
-                    # warp_points expects pts in output coordinates and H on same device
-                    # target_pts are already in the right coordinate system
-                    src_pts = augmentor.warp_points(H_inv, target_pts)
+            # Read the Source Coordinates (View 1) at the Target locations
+            src_x = map_b[0, sample_y, sample_x]
+            src_y = map_b[1, sample_y, sample_x]
 
-                else:
-                    # Use TPS unwarping if parameters exist
-                    T = (
-                        H1[batch_idx],
-                        H2[batch_idx],
-                        src_tps[batch_idx].unsqueeze(0),
-                        W_tps[batch_idx].unsqueeze(0),
-                        A_tps[batch_idx].unsqueeze(0),
-                    )
-                    # Note: This path needs proper implementation if TPS is used
-                    # For now, fallback to simple inverse homography
-                    H_inv = torch.inverse(H2[batch_idx])
-                    src_pts = augmentor.warp_points(H_inv, target_pts)
+            src_pts = torch.stack(
+                [src_x, src_y], dim=1
+            )  # [N, 2] in View 1 Image Coords
+            tgt_pts = tgt_img_pts.clone()  # [N, 2] in View 2 Image Coords
 
-                tgt_pts = target_pts.clone()
+            # 2. Filter Valid Points
+            # Check 1: Must be inside View 1 boundaries
+            mask_bound = (
+                (src_pts[:, 0] >= 0)
+                & (src_pts[:, 0] < rw)
+                & (src_pts[:, 1] >= 0)
+                & (src_pts[:, 1] < rh)
+            )
 
-                # Check out of bounds points (Source Image Boundaries)
-                mask_valid = (
-                    (src_pts[:, 0] >= 0)
-                    & (src_pts[:, 1] >= 0)
-                    & (src_pts[:, 0] < rw)
-                    & (src_pts[:, 1] < rh)
-                )
+            # Check 2: Must be valid in masks (not black border)
+            # Check Source Mask (at projected location)
+            s_ix = src_pts[:, 0].long().clamp(0, rw - 1)
+            s_iy = src_pts[:, 1].long().clamp(0, rh - 1)
 
-                negatives.append(tgt_pts[~mask_valid])
-                tgt_pts = tgt_pts[mask_valid]
-                src_pts = src_pts[mask_valid]
+            # Check Target Mask (at sampling location)
+            t_ix = sample_x
+            t_iy = sample_y
 
-                # Remove invalid pixels (Black Borders)
-                # Ensure indices are within bounds for mask lookup
-                src_x = torch.clamp(src_pts[:, 0].long(), 0, rw - 1)
-                src_y = torch.clamp(src_pts[:, 1].long(), 0, rh - 1)
-                tgt_x = torch.clamp(tgt_pts[:, 0].long(), 0, rw - 1)
-                tgt_y = torch.clamp(tgt_pts[:, 1].long(), 0, rh - 1)
+            mask_valid_pixels = (
+                mask1[batch_idx, s_iy, s_ix].bool()
+                & mask2[batch_idx, t_iy, t_ix].bool()
+            )
 
-                mask_valid = (
-                    mask1[batch_idx, src_y, src_x].bool()
-                    & mask2[batch_idx, tgt_y, tgt_x].bool()
-                )
+            total_mask = mask_bound & mask_valid_pixels
 
-                tgt_pts = tgt_pts[mask_valid]
-                src_pts = src_pts[mask_valid]
+            # Store Negatives (optional, usually not used heavily)
+            negatives.append(tgt_pts[~total_mask])
 
-                # Limit nb of matches if desired
-                if crop is not None and len(src_pts) > crop:
-                    rnd_idx = torch.randperm(len(src_pts), device=src_pts.device)[:crop]
-                    src_pts = src_pts[rnd_idx]
-                    tgt_pts = tgt_pts[rnd_idx]
+            # Keep Positives
+            p_src = src_pts[total_mask]
+            p_tgt = tgt_pts[total_mask]
+
+            # 3. Scale back to Feature Grid coordinates
+            p_src_grid = p_src / torch.tensor([ratio_x, ratio_y], device=p1.device)
+            p_tgt_grid = p_tgt / torch.tensor([ratio_x, ratio_y], device=p1.device)
+
+            # 4. Remove padding artifacts near edges of feature map
+            pad = 2
+            mask_edge = (
+                (p_src_grid[:, 0] >= pad)
+                & (p_src_grid[:, 0] < w - pad)
+                & (p_src_grid[:, 1] >= pad)
+                & (p_src_grid[:, 1] < h - pad)
+            )
+
+            p_src_grid = p_src_grid[mask_edge]
+            p_tgt_grid = p_tgt_grid[mask_edge]
+
+            # 5. Add to batch
+            if len(p_src_grid) > 0:
+                # Format: [x1, y1, x2, y2]
+                matches = torch.cat([p_src_grid, p_tgt_grid], dim=1)
+
+                # Optional: Limit number of matches to save memory
+                if crop is not None and len(matches) > crop:
+                    perm = torch.randperm(len(matches), device=matches.device)[:crop]
+                    matches = matches[perm]
+
+                positives.append(matches)
 
                 if debug_cnt >= 0 and debug_cnt < 4:
-                    plot_corrs(p1[batch_idx], p2[batch_idx], src_pts, tgt_pts)
-                    debug_cnt += 1
-
-                # Normalize back to Feature Map Grid Coordinates (w, h)
-                src_pts = src_pts / ratio
-                tgt_pts = tgt_pts / ratio
-
-                # Boundary Check on Feature Map
-                padto = 10 if crop is not None else 2
-                mask_valid1 = (
-                    (src_pts[:, 0] >= padto)
-                    & (src_pts[:, 1] >= padto)
-                    & (src_pts[:, 0] < (w - padto))
-                    & (src_pts[:, 1] < (h - padto))
-                )
-                mask_valid2 = (
-                    (tgt_pts[:, 0] >= padto)
-                    & (tgt_pts[:, 1] >= padto)
-                    & (tgt_pts[:, 0] < (w - padto))
-                    & (tgt_pts[:, 1] < (h - padto))
-                )
-
-                mask_valid = mask_valid1 & mask_valid2
-                tgt_pts = tgt_pts[mask_valid]
-                src_pts = src_pts[mask_valid]
-
-                # Remove repeated correspondences using a LUT
-                lut_mat = (
-                    torch.ones((h, w, 4), device=src_pts.device, dtype=src_pts.dtype)
-                    * -1
-                )
-                try:
-                    # Store (x1, y1, x2, y2) at location (y1, x1)
-                    lut_mat[src_pts[:, 1].long(), src_pts[:, 0].long()] = torch.cat(
-                        [src_pts, tgt_pts], dim=1
+                    plot_corrs(
+                        p1[batch_idx],
+                        p2[batch_idx],
+                        p_src_grid * ratio_x,
+                        p_tgt_grid * ratio_x,
                     )
-                    # Filter: Keep only the last written value (or valid ones)
-                    # This implicitly handles collisions by keeping one
-                    mask_valid = torch.all(lut_mat >= 0, dim=-1)
-                    points = lut_mat[mask_valid]
-                    positives.append(points)
-                except Exception as e:
-                    print(f"Error in LUT creation: {e}")
-                    pdb.set_trace()
+                    debug_cnt += 1
+            else:
+                positives.append(torch.empty((0, 4), device=p1.device))
 
     return negatives, positives
 

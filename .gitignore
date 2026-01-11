@@ -23,3 +23,8 @@ checkpoints/
 # --- Logs ---
 *.log
 logs/
+
+# --- Debug Outputs ---
+debug_correspondences.png
+# Optional: Ignore all pngs starting with debug_ to catch future ones
+debug_*.png

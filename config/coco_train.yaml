@@ -4,7 +4,7 @@ experiment:
   version: "v1.0"
 
 paths:
-  coco_root: "dataset/coco_20k/"
+  coco_root: "dataset/coco_train2017/"
   checkpoint_dir: "checkpoints/"
   log_dir: "logs/"
   # Ensure you have the teacher weights here
@@ -24,26 +24,38 @@ model:
   
 training:
   batch_size: 4
-  epochs: 50
+  epochs: 15
+  n_steps: 450000
   lr: 0.0003    # 3e-4
-  save_interval: 500 # Steps
+  save_interval: 5000 # Steps
   
   loss_weights:
-    heatmap: 1.0   # Weight for SuperPoint Dense Distillation (Focal Loss)
-    distill: 1.0    # Weight for Descriptor Matching (Dual Softmax)
+    heatmap: 1.0   
+    distill: 1.0    
     fine: 1.0
     reliability: 1.0
+
+  scheduler:
+    # Confidence Threshold: Start dense (0.0), end sparse (0.15)
+    conf_thresh:
+      start_val: 0.0
+      end_val: 0.15
+      start_pct: 0.0   # Start ramping immediately
+      end_pct: 0.5     # Reach max strictness at 50% of training
+
+
 
 visualization:
   colormap: "hot"   # Options: jet, inferno, turbo, hot, bone, plasma
 
+   
 augmentation:
   warp_resolution: [640, 480]  
   out_resolution: [640, 480]   
   sides_crop: 0.1              
   photometric: true            
   geometric: true              
-  use_tps: false                
-  tps_prob: 0.3                
-  difficulty: 0.1
+  use_tps: true                
+  tps_prob: 0.5                
+  difficulty: 0.3
 
