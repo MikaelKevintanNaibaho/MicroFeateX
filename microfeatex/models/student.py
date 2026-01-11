@@ -67,6 +67,7 @@ class LightweightBackbone(nn.Module):
         self.use_depthwise = use_depthwise
 
         # Channel definitions (Base config: 4, 8, 24, 64, 128)
+        # TO DO: check the backbone halving backbone architecture
         self.ch_sizes = [
             c(4),  # c1
             c(8),  # c2

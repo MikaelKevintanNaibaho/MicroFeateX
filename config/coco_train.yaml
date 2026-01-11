@@ -32,7 +32,7 @@ training:
     heatmap: 1.0   # Weight for SuperPoint Dense Distillation (Focal Loss)
     distill: 1.0    # Weight for Descriptor Matching (Dual Softmax)
     fine: 1.0
-    reliability: 10.0
+    reliability: 1.0
 
 visualization:
   colormap: "hot"   # Options: jet, inferno, turbo, hot, bone, plasma
@@ -43,7 +43,7 @@ augmentation:
   sides_crop: 0.1              
   photometric: true            
   geometric: true              
-  use_tps: true                
+  use_tps: false                
   tps_prob: 0.3                
   difficulty: 0.1
 

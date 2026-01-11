@@ -236,6 +236,8 @@ class Trainer:
 
                 m1 = desc1[b, :, pts1_y, pts1_x].t()
                 m2 = desc2[b, :, pts2_y, pts2_x].t()
+                m1 = F.normalize(m1, dim=1)
+                m2 = F.normalize(m2, dim=1)
                 l_ds, _ = losses.dual_softmax_loss(m1, m2, temp=0.2)
 
                 # --- Reliability Loss ---
