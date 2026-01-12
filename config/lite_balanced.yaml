@@ -1,11 +1,11 @@
 experiment:
-  name: "lite_hadamard"
-  description: "Lite Model with Hadamard Mixing (width=1.0)"
+  name: "lite_balanced"
+  description: "Lite Model (Depthwise Separable, width=1.0)"
   version: "v1.1"
 
 paths:
   coco_root: "dataset/coco_train2017/"
-  checkpoint_dir: "checkpoints/lite_hadamard"
+  checkpoint_dir: "checkpoints/lite"
   log_dir: "logs/"
   superpoint_weights: "dataset/superpoint_v1.pth" 
 
@@ -20,7 +20,7 @@ model:
   descriptor_dim: 64
   width_mult: 1.0
   use_depthwise: true
-  use_hadamard: true
+  use_hadamard: false
   
 training:
   batch_size: 4

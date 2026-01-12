@@ -1,11 +1,11 @@
 experiment:
-  name: "lite_hadamard"
-  description: "Lite Model with Hadamard Mixing (width=1.0)"
+  name: "nano_hadamard"
+  description: "Nano Model with Hadamard Mixing (width=0.5)"
   version: "v1.1"
 
 paths:
   coco_root: "dataset/coco_train2017/"
-  checkpoint_dir: "checkpoints/lite_hadamard"
+  checkpoint_dir: "checkpoints/nano_hadamard"
   log_dir: "logs/"
   superpoint_weights: "dataset/superpoint_v1.pth" 
 
@@ -18,7 +18,7 @@ model:
   teacher: "alike"
   alike_model: "alike-t"
   descriptor_dim: 64
-  width_mult: 1.0
+  width_mult: 0.5
   use_depthwise: true
   use_hadamard: true
   
