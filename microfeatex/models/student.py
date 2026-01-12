@@ -4,6 +4,8 @@ import torch.nn.functional as F
 
 from microfeatex.models.utils import estimate_flops, count_parameters, print_model_stats
 
+from microfeatex.models.walsh_hadamard import HadamardMixing
+
 
 def _make_divisible(v, divisor=8, min_value=None):
     """
@@ -20,36 +22,50 @@ def _make_divisible(v, divisor=8, min_value=None):
 
 class ConvBlock(nn.Module):
     """
-    Switchable Block: Can be Standard Conv or Depthwise Separable
+    Switchable Block: Can be Standard Conv, Depthwise Separable, or Hadamard Mixing.
     """
 
-    def __init__(self, in_c, out_c, stride=1, kernel_size=3, use_depthwise=False):
+    def __init__(
+        self,
+        in_c,
+        out_c,
+        stride=1,
+        kernel_size=3,
+        use_depthwise=False,
+        use_hadamard=False,
+    ):
         super().__init__()
         self.use_depthwise = use_depthwise
         padding = kernel_size // 2
 
         if use_depthwise:
-            # ~8-9x fewer FLOPs
+            # Select Pointwise Layer Type
+            if use_hadamard:
+                # Fixed Hadamard Transform (No Bias, Non-trainable)
+                pointwise = HadamardMixing(in_c, out_c)
+            else:
+                # Standard Learnable 1x1 Conv
+                pointwise = nn.Conv2d(in_c, out_c, 1, 1, 0, bias=False)
+
             self.net = nn.Sequential(
-                # Depthwise
+                # Depthwise (Spatial)
                 nn.Conv2d(
                     in_c, in_c, kernel_size, stride, padding, groups=in_c, bias=False
                 ),
                 nn.BatchNorm2d(in_c),
                 nn.ReLU6(inplace=True),
-                # Pointwise
-                nn.Conv2d(in_c, out_c, 1, 1, 0, bias=False),
+                # Pointwise (Channel Mixing)
+                pointwise,
                 nn.BatchNorm2d(out_c),
                 nn.ReLU6(inplace=True),
             )
         else:
-            # Standard Conv (BasicLayer)
+            # Standard Conv (BasicLayer) - Hadamard is usually not applied here directly
+            # as it replaces the 1x1 mixing part of a separable block.
             self.net = nn.Sequential(
                 nn.Conv2d(in_c, out_c, kernel_size, stride, padding, bias=False),
                 nn.BatchNorm2d(out_c),
-                nn.ReLU(
-                    inplace=True
-                ),  # Using ReLU (standard) or ReLU6 (better for quantization)
+                nn.ReLU(inplace=True),
             )
 
     def forward(self, x):
@@ -57,7 +73,7 @@ class ConvBlock(nn.Module):
 
 
 class LightweightBackbone(nn.Module):
-    def __init__(self, width_mult=1.0, use_depthwise=False):
+    def __init__(self, width_mult=1.0, use_depthwise=False, use_hadamard=False):
         super().__init__()
 
         # Helper to scale channels
@@ -67,7 +83,6 @@ class LightweightBackbone(nn.Module):
         self.use_depthwise = use_depthwise
 
         # Channel definitions (Base config: 4, 8, 24, 64, 128)
-        # TO DO: check the backbone halving backbone architecture
         self.ch_sizes = [
             c(4),  # c1
             c(8),  # c2
@@ -76,71 +91,62 @@ class LightweightBackbone(nn.Module):
             c(128),  # c5
         ]
 
-        # Define Block Type
-        Block = ConvBlock
+        # Define Block Type wrapper to pass params easily
+        def Block(in_c, out_c, stride=1, kernel_size=3, use_depthwise=use_depthwise):
+            return ConvBlock(
+                in_c, out_c, stride, kernel_size, use_depthwise, use_hadamard
+            )
 
         # --- Layers ---
         # Stem (Keep standard conv for first layer usually)
         self.block1 = nn.Sequential(
-            Block(1, self.ch_sizes[0], stride=2, use_depthwise=False),  # H/2
-            Block(self.ch_sizes[0], self.ch_sizes[0], use_depthwise=use_depthwise),
+            # Force standard conv for the very first layer (H/2) to retain info
+            ConvBlock(1, self.ch_sizes[0], stride=2, use_depthwise=False),
+            Block(self.ch_sizes[0], self.ch_sizes[0]),
         )
 
         self.block2 = nn.Sequential(
-            Block(
-                self.ch_sizes[0],
-                self.ch_sizes[1],
-                stride=2,
-                use_depthwise=use_depthwise,
-            ),  # H/4
-            Block(self.ch_sizes[1], self.ch_sizes[1], use_depthwise=use_depthwise),
+            Block(self.ch_sizes[0], self.ch_sizes[1], stride=2),  # H/4
+            Block(self.ch_sizes[1], self.ch_sizes[1]),
         )
 
         self.block3 = nn.Sequential(
-            Block(
-                self.ch_sizes[1],
-                self.ch_sizes[2],
-                stride=2,
-                use_depthwise=use_depthwise,
-            ),  # H/8
-            Block(self.ch_sizes[2], self.ch_sizes[2], use_depthwise=use_depthwise),
+            Block(self.ch_sizes[1], self.ch_sizes[2], stride=2),  # H/8
+            Block(self.ch_sizes[2], self.ch_sizes[2]),
         )
 
         self.block4 = nn.Sequential(
-            Block(
-                self.ch_sizes[2],
-                self.ch_sizes[3],
-                stride=2,
-                use_depthwise=use_depthwise,
-            ),  # H/16
-            Block(self.ch_sizes[3], self.ch_sizes[3], use_depthwise=use_depthwise),
+            Block(self.ch_sizes[2], self.ch_sizes[3], stride=2),  # H/16
+            Block(self.ch_sizes[3], self.ch_sizes[3]),
         )
 
-        self.block5 = Block(
-            self.ch_sizes[3], self.ch_sizes[3], use_depthwise=use_depthwise
-        )
-        self.block6 = Block(
-            self.ch_sizes[3], self.ch_sizes[4], stride=2, use_depthwise=use_depthwise
-        )  # H/32
+        self.block5 = Block(self.ch_sizes[3], self.ch_sizes[3])
+        self.block6 = Block(self.ch_sizes[3], self.ch_sizes[4], stride=2)  # H/32
 
         # --- Fusion (Optimized) ---
-        # Calculate total channels entering fusion
         fusion_in_channels = self.ch_sizes[2] + self.ch_sizes[3] + self.ch_sizes[4]
         self.fusion_out_channels = c(64)
 
-        self.fusion = nn.Sequential(
-            # OPTIMIZATION: 1x1 Conv to squeeze channels first
-            nn.Conv2d(
+        # Determine Fusion 1x1 Layer
+        if use_hadamard and use_depthwise:
+            fusion_reducer = HadamardMixing(
+                fusion_in_channels, self.fusion_out_channels
+            )
+        else:
+            fusion_reducer = nn.Conv2d(
                 fusion_in_channels, self.fusion_out_channels, kernel_size=1, bias=False
-            ),
+            )
+
+        self.fusion = nn.Sequential(
+            # 1x1 Conv or Hadamard to squeeze channels
+            fusion_reducer,
             nn.BatchNorm2d(self.fusion_out_channels),
             nn.ReLU(inplace=True),
-            # Then spatial processing
+            # Spatial processing
             Block(
                 self.fusion_out_channels,
                 self.fusion_out_channels,
                 kernel_size=3,
-                use_depthwise=use_depthwise,
             ),
         )
 
@@ -173,42 +179,58 @@ class LightweightBackbone(nn.Module):
 
 
 class EfficientFeatureExtractor(nn.Module):
-    def __init__(self, descriptor_dim=64, width_mult=1.0, use_depthwise=False):
+    def __init__(
+        self, descriptor_dim=64, width_mult=1.0, use_depthwise=False, use_hadamard=False
+    ):
         super().__init__()
 
-        # Initialize Backbone
+        # Initialize Backbone with Hadamard option
         self.backbone = LightweightBackbone(
-            width_mult=width_mult, use_depthwise=use_depthwise
+            width_mult=width_mult,
+            use_depthwise=use_depthwise,
+            use_hadamard=use_hadamard,
         )
 
-        # Get output channels from backbone to size heads correctly
         backbone_out = self.backbone.fusion_out_channels
-
-        # Define Block Type for Heads
         Block = ConvBlock
+
+        # Note: Heads generally require learnable parameters to map features to
+        # specific outputs (heatmaps/descriptors), so we generally keep standard convs here.
+        # However, the intermediate blocks in the heads can respect the use_hadamard flag.
 
         # 1. Detector Head
         self.keypoint_head = nn.Sequential(
-            Block(backbone_out, 32, use_depthwise=use_depthwise),
+            Block(
+                backbone_out, 32, use_depthwise=use_depthwise, use_hadamard=use_hadamard
+            ),
             nn.Conv2d(32, 65, kernel_size=1),
         )
 
         # 2. Descriptor Head
         self.descriptor_head = nn.Sequential(
-            Block(backbone_out, 128, use_depthwise=use_depthwise),
+            Block(
+                backbone_out,
+                128,
+                use_depthwise=use_depthwise,
+                use_hadamard=use_hadamard,
+            ),
             nn.Conv2d(128, descriptor_dim, kernel_size=1),
             nn.BatchNorm2d(descriptor_dim),
         )
 
         # 3. Reliability Head
         self.reliability_head = nn.Sequential(
-            Block(backbone_out, 32, use_depthwise=use_depthwise),
+            Block(
+                backbone_out, 32, use_depthwise=use_depthwise, use_hadamard=use_hadamard
+            ),
             nn.Conv2d(32, 1, kernel_size=1),
         )
 
         # 4. Offset Head
         self.offset_head = nn.Sequential(
-            Block(backbone_out, 32, use_depthwise=use_depthwise),
+            Block(
+                backbone_out, 32, use_depthwise=use_depthwise, use_hadamard=use_hadamard
+            ),
             nn.Conv2d(32, 2, kernel_size=1),
         )
 
@@ -238,10 +260,6 @@ class EfficientFeatureExtractor(nn.Module):
         }
 
     def profile(self, input_size=(1, 1, 480, 640)):
-        """
-        Self-profiling method.
-        Usage: model.profile()
-        """
         print_model_stats(self, name=self.__class__.__name__, input_size=input_size)
 
 
@@ -250,20 +268,25 @@ if __name__ == "__main__":
     print("MicroFeatEX Model Benchmarking")
     print("=" * 60)
 
-    # Define the experiments you want to run
+    # Added "Hadamard" config to experiments
     configs = [
-        ("Baseline (Accuracy)", 1.0, False),  # Width 1.0, Standard Conv
-        ("Lite (Balanced)", 1.0, True),  # Width 1.0, Depthwise
-        ("Nano (Speed)", 0.5, True),  # Width 0.5, Depthwise
+        ("Baseline (Accuracy)", 1.0, False, False),
+        ("Lite (Balanced)", 1.0, True, False),
+        ("Nano (Speed)", 0.5, True, False),
+        ("Nano-Hadamard (Fixed Mixing)", 0.5, True, True),
     ]
 
     input_res = (1, 1, 480, 640)
 
-    for name, width, dw in configs:
+    for name, width, dw, hadamard_flag in configs:
         print(f"\n--- Testing Configuration: {name} ---")
-        model = EfficientFeatureExtractor(
-            descriptor_dim=64, width_mult=width, use_depthwise=dw
-        )
-
-        # Use the imported utility directly on the instance
-        model.profile(input_size=input_res)
+        try:
+            model = EfficientFeatureExtractor(
+                descriptor_dim=64,
+                width_mult=width,
+                use_depthwise=dw,
+                use_hadamard=hadamard_flag,
+            )
+            model.profile(input_size=input_res)
+        except Exception as e:
+            print(f"Error: {e}")

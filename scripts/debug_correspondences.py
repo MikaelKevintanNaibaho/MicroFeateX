@@ -1,190 +1,197 @@
 import torch
-import matplotlib.pyplot as plt
+import cv2
 import numpy as np
-from microfeatex.data.augmentation import AugmentationPipe
-from microfeatex.data.dataset import Dataset
+import sys
+import argparse
+from pathlib import Path
+
+# Fix imports if running as script
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+
+from microfeatex.models.student import EfficientFeatureExtractor
 from microfeatex.utils.config import load_config
+from microfeatex.utils import geometry
 
 
-def visualize_correspondences(p1, p2, coords_map, num_samples=50):
-    """
-    Visualize correspondences using the Dense Coordinate Map.
-    We sample points in Image 2 (Target) and look up their position in Image 1 (Source).
-    """
-    B, C, H, W = p2.shape
-    device = p1.device
-
-    # 1. Generate random integer coordinates in Image 2
-    # We pick random pixels in the warped image
-    pts2_x = torch.randint(0, W, (num_samples,), device=device)
-    pts2_y = torch.randint(0, H, (num_samples,), device=device)
-
-    # 2. Look up where these pixels came from using coords_map
-    # coords_map shape: [B, 2, H, W]
-    # Channel 0 is X, Channel 1 is Y
-    map_b = coords_map[0]  # First batch item
-
-    pts1_x = map_b[0, pts2_y, pts2_x]
-    pts1_y = map_b[1, pts2_y, pts2_x]
-
-    pts1 = torch.stack([pts1_x, pts1_y], dim=1)  # [N, 2]
-    pts2 = torch.stack([pts2_x, pts2_y], dim=1).float()  # [N, 2]
-
-    # 3. Filter points that land outside Image 1 (due to padding/cropping)
-    valid_mask = (
-        (pts1[:, 0] >= 0) & (pts1[:, 0] < W) & (pts1[:, 1] >= 0) & (pts1[:, 1] < H)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Debug Correspondences")
+    parser.add_argument(
+        "--config", type=str, default="config/config.yaml", help="Path to model config"
     )
-
-    print(f"Valid correspondences found: {valid_mask.sum().item()}/{num_samples}")
-
-    # Filter for visualization
-    pts1 = pts1[valid_mask]
-    pts2 = pts2[valid_mask]
-
-    # Visualize
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-
-    # Image 1 (Source)
-    # Move channel to last for plotting
-    img1_np = p1[0].permute(1, 2, 0).cpu().numpy()
-    if img1_np.shape[2] == 1:
-        img1_np = img1_np.squeeze(2)
-
-    axes[0].imshow(img1_np, cmap="gray")
-    # Plot using a colormap so we can see which point matches which
-    colors = np.linspace(0, 1, len(pts1))
-    axes[0].scatter(
-        pts1[:, 0].cpu(),
-        pts1[:, 1].cpu(),
-        c=colors,
-        cmap="hsv",
-        s=50,
-        edgecolors="white",
+    parser.add_argument(
+        "--ckpt_path", type=str, required=True, help="Path to model checkpoint (.pth)"
     )
-    axes[0].set_title("Image 1 (Source Positions)")
-
-    # Image 2 (Target/Warped)
-    img2_np = p2[0].permute(1, 2, 0).cpu().numpy()
-    if img2_np.shape[2] == 1:
-        img2_np = img2_np.squeeze(2)
-
-    axes[1].imshow(img2_np, cmap="gray")
-    axes[1].scatter(
-        pts2[:, 0].cpu(),
-        pts2[:, 1].cpu(),
-        c=colors,
-        cmap="hsv",
-        s=50,
-        edgecolors="white",
+    parser.add_argument(
+        "--img1", type=str, default="assets/ref.png", help="Path to first image"
     )
-    axes[1].set_title("Image 2 (Sampled Grid)")
+    parser.add_argument(
+        "--img2", type=str, default="assets/tgt.png", help="Path to second image"
+    )
+    parser.add_argument(
+        "--output", type=str, default="debug_matches.png", help="Output image path"
+    )
+    parser.add_argument(
+        "--conf", type=float, default=0.015, help="Keypoint confidence threshold"
+    )
+    return parser.parse_args()
 
-    plt.tight_layout()
-    plt.savefig("debug_correspondences.png", dpi=150)
-    print("Saved visualization to debug_correspondences.png")
 
-    return pts1, pts2
-
-
-def test_descriptor_matching(desc1, desc2, pts1, pts2):
+def draw_matches(img1, img2, kpts1, kpts2, color=(0, 255, 0)):
     """
-    Test if descriptor matching works correctly
+    Draws lines between matching keypoints.
     """
-    # Sample descriptors using nearest neighbor
-    # Clamp to ensure we don't crash on edge pixels
-    pts1_y = pts1[:, 1].long().clamp(0, desc1.shape[2] - 1)
-    pts1_x = pts1[:, 0].long().clamp(0, desc1.shape[3] - 1)
-    pts2_y = pts2[:, 1].long().clamp(0, desc2.shape[2] - 1)
-    pts2_x = pts2[:, 0].long().clamp(0, desc2.shape[3] - 1)
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
 
-    d1 = desc1[0, :, pts1_y, pts1_x].t()  # [N, C]
-    d2 = desc2[0, :, pts2_y, pts2_x].t()  # [N, C]
+    # Create a canvas
+    out = np.zeros((max(h1, h2), w1 + w2, 3), dtype=np.uint8)
+    out[:h1, :w1] = img1
+    out[:h2, w1:] = img2
 
-    # Check normalization
-    norms1 = torch.norm(d1, dim=1)
-    norms2 = torch.norm(d2, dim=1)
-    print(
-        f"Descriptor norms (should be ~1.0) - d1: {norms1.mean():.4f}, d2: {norms2.mean():.4f}"
-    )
+    for (x1, y1), (x2, y2) in zip(kpts1, kpts2):
+        pt1 = (int(x1), int(y1))
+        pt2 = (int(x2) + w1, int(y2))
+        cv2.line(out, pt1, pt2, color, 1)
+        cv2.circle(out, pt1, 2, color, -1)
+        cv2.circle(out, pt2, 2, color, -1)
 
-    # Compute similarity
-    # Since descriptors are normalized, dot product is cosine similarity
-    similarity = (d1 * d2).sum(dim=1)
-    print(f"Mean descriptor similarity (Correct Matches): {similarity.mean():.4f}")
-    print(f"Min: {similarity.min():.4f}, Max: {similarity.max():.4f}")
-
-    # Check if matching works (Self-Matching)
-    # We check if d1[i] is closest to d2[i] among all d2
-    dist_mat = d1 @ d2.t()  # [N, N]
-    nn_indices = dist_mat.argmax(dim=1)
-
-    correct = (nn_indices == torch.arange(len(d1), device=d1.device)).float()
-    accuracy = correct.mean()
-
-    print(f"Self-matching accuracy (Batch of {len(d1)} points): {accuracy:.2%}")
-    return accuracy
+    return out
 
 
 def main():
-    # Load config
-    # Ensure this points to your actual config file
-    config = load_config("config/coco_train.yaml")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args = parse_args()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Create augmentor
-    augmentor = AugmentationPipe(config, device)
+    # 1. Load Config & Model
+    print(f"Loading Config: {args.config}")
+    config = load_config(args.config)
 
-    dataset = Dataset(config["paths"]["coco_root"], config)
+    model_conf = config.get("model", {})
 
-    # Get the first image (dataset returns dictionary)
-    data_item = dataset[0]
-    # data_item is already the Tensor [C, H, W]
-    img = data_item.unsqueeze(0).to(device)
+    print("Building Model...")
+    model = EfficientFeatureExtractor(
+        descriptor_dim=model_conf.get("descriptor_dim", 64),
+        width_mult=model_conf.get("width_mult", 1.0),
+        use_depthwise=model_conf.get("use_depthwise", False),
+        use_hadamard=model_conf.get(
+            "use_hadamard", False
+        ),  # CRITICAL UPDATE for your new models
+    ).to(device)
 
-    print("Running Augmentation on Real Image...")
-    p1, p2, H, mask, coords_map = augmentor(img)
-
-    print("Testing correspondence mapping...")
-    # Pass coords_map instead of H
-    pts1, pts2 = visualize_correspondences(p1, p2, coords_map, num_samples=100)
-
-    if len(pts1) < 5:
-        print("Not enough valid points to test descriptors. Try running again.")
+    # Load Checkpoint
+    print(f"Loading checkpoint from {args.ckpt_path}...")
+    try:
+        ckpt = torch.load(args.ckpt_path, map_location=device)
+        # Handle both full training state (with 'model_state') and raw weights
+        if "model_state" in ckpt:
+            model.load_state_dict(ckpt["model_state"])
+        else:
+            model.load_state_dict(ckpt)
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
         return
-
-    # Test with actual model
-    from microfeatex.models.student import EfficientFeatureExtractor
-
-    model = EfficientFeatureExtractor().to(device)
-    ckpt_path = "checkpoints/last.pth"  # Or microfeatex_11999.pth
-    print(f"Loading weights from {ckpt_path}...")
-    ckpt = torch.load(ckpt_path, map_location=device)
-    if "model_state" in ckpt:
-        model.load_state_dict(ckpt["model_state"])
-    else:
-        model.load_state_dict(ckpt)
 
     model.eval()
 
-    print("\nRunning Model...")
+    # 2. Load Images
+    print(f"Processing: {args.img1} <-> {args.img2}")
+    img1_raw = cv2.imread(args.img1)
+    img2_raw = cv2.imread(args.img2)
+
+    if img1_raw is None or img2_raw is None:
+        print(f"Error: Could not load images. Check paths.")
+        return
+
+    # Resize for consistency
+    H, W = 480, 640
+    img1 = cv2.resize(img1_raw, (W, H))
+    img2 = cv2.resize(img2_raw, (W, H))
+
+    # Convert to Tensor [1, 1, H, W]
+    def preprocess(img):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        t = torch.from_numpy(gray).float() / 255.0
+        return t.unsqueeze(0).unsqueeze(0).to(device)
+
+    t1 = preprocess(img1)
+    t2 = preprocess(img2)
+
+    # 3. Inference
     with torch.no_grad():
-        out1 = model(p1)
-        out2 = model(p2)
+        out1 = model(t1)
+        out2 = model(t2)
 
-    print("\nTesting descriptor matching...")
-    # Scale points to descriptor resolution (e.g. 480x640 -> 60x80 means divide by 8)
-    pts1_scaled = pts1 / 8.0
-    pts2_scaled = pts2 / 8.0
+    # 4. Extract Features
+    def extract_features(out, conf_thresh=0.015):
+        # Heatmap
+        heatmap = out["heatmap"]  # [1, 1, H, W]
+        # Simple NMS (Max Pooling)
+        nms_map = geometry.simple_nms(heatmap, nms_radius=4)
 
-    acc = test_descriptor_matching(
-        out1["descriptors"], out2["descriptors"], pts1_scaled, pts2_scaled
-    )
+        # Get coordinates where score > thresh
+        ys, xs = torch.where(nms_map.squeeze() > conf_thresh)
 
-    if acc < 0.1:  # Threshold is low because untrained model is random
-        print("\n⚠️  Accuracy is low (Expected for untrained model).")
-        print("If this is a trained checkpoint, this indicates a problem.")
-    else:
-        print(f"\n✅ Matching worked! ({acc:.1%} correct)")
+        if len(xs) == 0:
+            return None, None, None
+
+        scores = heatmap[0, 0, ys, xs]
+        kpts = torch.stack([xs, ys], dim=1).float()  # [N, 2]
+
+        # Sample Descriptors
+        desc_map = out["descriptors"]
+
+        # Normalize kpts: (x / W) * 2 - 1
+        norm_kpts = torch.zeros_like(kpts)
+        norm_kpts[:, 0] = (kpts[:, 0] / (W - 1)) * 2 - 1
+        norm_kpts[:, 1] = (kpts[:, 1] / (H - 1)) * 2 - 1
+
+        # grid_sample expects [1, 1, N, 2]
+        grid = norm_kpts.view(1, 1, -1, 2)
+
+        # Sample
+        desc = torch.nn.functional.grid_sample(desc_map, grid, align_corners=True)
+        # [N, D]
+        desc = desc.squeeze().t()
+
+        # Normalize descriptors
+        desc = torch.nn.functional.normalize(desc, p=2, dim=1)
+
+        return kpts, desc, scores
+
+    kpts1, desc1, scores1 = extract_features(out1, args.conf)
+    kpts2, desc2, scores2 = extract_features(out2, args.conf)
+
+    if kpts1 is None or kpts2 is None:
+        print("No keypoints found in one of the images. Try lowering --conf.")
+        return
+
+    print(f"Extracted: Img1 ({len(kpts1)}), Img2 ({len(kpts2)})")
+
+    # 5. Matching (Mutual Nearest Neighbor)
+    sim = torch.matmul(desc1, desc2.t())
+
+    max_val_1, max_idx_1 = torch.max(sim, dim=1)
+    max_val_2, max_idx_2 = torch.max(sim, dim=0)
+
+    matches = []
+
+    for i in range(len(kpts1)):
+        j = max_idx_1[i]
+        # Mutual Check
+        if max_idx_2[j] == i and max_val_1[i] > 0.75:
+            matches.append((kpts1[i], kpts2[j]))
+
+    print(f"Found {len(matches)} mutual matches.")
+
+    # 6. Visualize
+    mkpts1 = [m[0].cpu().numpy() for m in matches]
+    mkpts2 = [m[1].cpu().numpy() for m in matches]
+
+    vis = draw_matches(img1, img2, mkpts1, mkpts2)
+
+    cv2.imwrite(args.output, vis)
+    print(f"Saved visualization to {args.output}")
 
 
 if __name__ == "__main__":

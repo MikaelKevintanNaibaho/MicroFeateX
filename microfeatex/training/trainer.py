@@ -33,7 +33,22 @@ class Trainer:
 
         # Setup Paths & Logging
         self.ckpt_dir = self.args.ckpt_save_path
-        self.log_dir = setup_logging_dir(self.ckpt_dir, self.args.model_name)
+
+        # Check if user specified 'log_dir' in the YAML config
+        paths_conf = self.config.get("paths", {})
+        yaml_log_dir = paths_conf.get("log_dir", None)
+
+        if yaml_log_dir:
+            # Case 1: Use the specific log path from config (e.g., "logs/")
+            print(f"Using defined log directory: {yaml_log_dir}")
+            self.log_dir = setup_logging_dir(
+                yaml_log_dir, self.args.model_name, is_explicit_log_path=True
+            )
+        else:
+            # Case 2: Fallback to creating a 'logdir' inside checkpoints folder
+            self.log_dir = setup_logging_dir(
+                self.ckpt_dir, self.args.model_name, is_explicit_log_path=False
+            )
         vis_conf = self.config.get("visualization", {})
         cmap_name = vis_conf.get("colormap", "jet")
 
@@ -127,6 +142,7 @@ class Trainer:
             descriptor_dim=model_conf.get("descriptor_dim", 64),
             width_mult=model_conf.get("width_mult", 1.0),
             use_depthwise=model_conf.get("use_depthwise", False),
+            use_hadamard=model_conf.get("use_hadamard", False),
         ).to(self.device)
 
         self.student.profile()
@@ -179,6 +195,7 @@ class Trainer:
             "model_state": self.student.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scaler_state": self.scaler.state_dict(),
+            "scheduler_state": self.scheduler.state_dict(),
             "step": step,
             "epoch": self.current_epoch,
         }
@@ -197,6 +214,8 @@ class Trainer:
             self.student.load_state_dict(ckpt["model_state"])
             self.optimizer.load_state_dict(ckpt["optimizer_state"])
             self.scaler.load_state_dict(ckpt["scaler_state"])
+            if "scheduler_state" in ckpt:
+                self.scheduler.load_state_dict(ckpt["scheduler_state"])
             self.start_step = ckpt["step"] + 1
             self.current_epoch = ckpt.get("epoch", 0)
 
@@ -417,6 +436,7 @@ class Trainer:
         with tqdm.tqdm(total=self.total_steps, initial=self.start_step) as pbar:
             step = self.start_step
             while step < self.total_steps:
+                self.start_step = step
                 try:
                     batch = next(iterator)
                 except StopIteration:

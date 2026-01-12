@@ -3,6 +3,36 @@ import kornia.geometry.transform as K
 import torch.nn.functional as F
 
 
+def simple_nms(scores, nms_radius: int):
+    """
+    Fast Non-Maximum Suppression using Max Pooling.
+
+    Args:
+        scores (torch.Tensor): Heatmap [B, 1, H, W]
+        nms_radius (int): Radius for suppression.
+
+    Returns:
+        torch.Tensor: Suppressed heatmap (zeros where not max).
+    """
+    if nms_radius < 0:
+        return scores
+
+    # kernel_size = 2*radius + 1 to cover the radius
+    # padding = radius to maintain spatial size
+    pool_size = nms_radius * 2 + 1
+
+    # Find local maximums
+    max_scores = F.max_pool2d(
+        scores, kernel_size=pool_size, stride=1, padding=nms_radius
+    )
+
+    # Create binary mask where original score equals local max
+    mask = scores == max_scores
+
+    # Zero out everything else
+    return scores * mask.float()
+
+
 def scale_homography(H, stride=8.0):
     """
     Scales the translation components of a Homography matrix to match

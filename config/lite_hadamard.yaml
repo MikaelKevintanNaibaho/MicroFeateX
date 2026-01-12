@@ -1,11 +1,11 @@
 experiment:
-  name: "MicroFeatEX_Distill"
-  description: "Student (EfficientFeatureExtractor) with SuperPoint Teacher + Synthetic COCO"
+  name: "lite_hadamard_Distill"
+  description: "Student (EfficientFeatureExtractor) with ALIKE Teacher + Synthetic COCO"
   version: "v1.0"
 
 paths:
   coco_root: "dataset/coco_train2017/"
-  checkpoint_dir: "checkpoints/"
+  checkpoint_dir: "checkpoints/lite_hadamard"
   log_dir: "logs/"
   # Ensure you have the teacher weights here
   superpoint_weights: "dataset/superpoint_v1.pth" 
@@ -20,8 +20,8 @@ model:
   alike_model: "alike-t"   # Options: alike-t, alike-s, alike-n, alike-l
   descriptor_dim: 64
   width_mult: 1.0
-  use_depthwise: false
-  use_hadamard: false
+  use_depthwise: true
+  use_hadamard: true
   
 training:
   batch_size: 4
