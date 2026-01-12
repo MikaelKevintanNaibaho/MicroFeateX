@@ -28,3 +28,12 @@ logs/
 debug_correspondences.png
 # Optional: Ignore all pngs starting with debug_ to catch future ones
 debug_*.png
+# Ignore images globally (root and subfolders)
+*.png
+*.jpg
+*.jpeg
+
+# ... But allow images in the assets folder
+!assets/*.png
+!assets/*.jpg
+!assets/*.jpeg
