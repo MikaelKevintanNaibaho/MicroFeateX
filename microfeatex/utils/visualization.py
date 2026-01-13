@@ -92,18 +92,30 @@ class Visualizer:
     def draw_matches(self, img1, img2, kpts1, kpts2):
         """
         Draws side-by-side matches.
-        Input: img1 [1, H, W], kpts1 [N, 2] (x, y)
+        Input: img1 [1, C, H, W] (C can be 1 or 3), kpts1 [N, 2] (x, y)
         """
         # Convert to numpy/cv2
         h, w = img1.shape[-2], img1.shape[-1]
-        i1 = (img1.squeeze().cpu().numpy() * 255).astype(np.uint8)
-        i2 = (img2.squeeze().cpu().numpy() * 255).astype(np.uint8)
-
-        # Create canvas
-        canvas = np.zeros((h, w * 2), dtype=np.uint8)
-        canvas[:, :w] = i1
-        canvas[:, w:] = i2
-        canvas = cv2.cvtColor(canvas, cv2.COLOR_GRAY2RGB)
+        
+        # Handle both grayscale [1, 1, H, W] and RGB [1, 3, H, W]
+        i1 = img1.squeeze(0).cpu().numpy()  # [C, H, W]
+        i2 = img2.squeeze(0).cpu().numpy()  # [C, H, W]
+        
+        if i1.shape[0] == 3:
+            # RGB: [3, H, W] -> [H, W, 3]
+            i1 = (np.transpose(i1, (1, 2, 0)) * 255).astype(np.uint8)
+            i2 = (np.transpose(i2, (1, 2, 0)) * 255).astype(np.uint8)
+            canvas = np.zeros((h, w * 2, 3), dtype=np.uint8)
+            canvas[:, :w] = i1
+            canvas[:, w:] = i2
+        else:
+            # Grayscale: [1, H, W] -> [H, W]
+            i1 = (i1.squeeze() * 255).astype(np.uint8)
+            i2 = (i2.squeeze() * 255).astype(np.uint8)
+            canvas = np.zeros((h, w * 2), dtype=np.uint8)
+            canvas[:, :w] = i1
+            canvas[:, w:] = i2
+            canvas = cv2.cvtColor(canvas, cv2.COLOR_GRAY2RGB)
 
         # Draw lines
         # Limit to 50 random matches to avoid clutter

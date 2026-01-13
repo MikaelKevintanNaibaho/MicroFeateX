@@ -100,7 +100,7 @@ class LightweightBackbone(nn.Module):
         # Stem (Keep standard conv for first layer usually)
         self.block1 = nn.Sequential(
             # Force standard conv for the very first layer (H/2) to retain info
-            ConvBlock(1, self.ch_sizes[0], stride=2, use_depthwise=False),
+            ConvBlock(3, self.ch_sizes[0], stride=2, use_depthwise=False),
             Block(self.ch_sizes[0], self.ch_sizes[0]),
         )
 
@@ -314,7 +314,7 @@ class EfficientFeatureExtractor(nn.Module):
             "keypoint_logits": kpts_logits,
         }
 
-    def profile(self, input_size=(1, 1, 480, 640)):
+    def profile(self, input_size=(1, 3, 480, 640)):
         print_model_stats(self, name=self.__class__.__name__, input_size=input_size)
 
 
