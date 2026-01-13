@@ -41,7 +41,7 @@ class MicroFeatEXCriterion(nn.Module):
             )
         return scores
 
-    def compute_distillation(self, student_out, teacher_out, input_shape):
+    def compute_distillation(self, student_out, teacher_out, input_shape, debug=False):
         """Computes the Heatmap/Distillation loss depending on teacher type."""
         s_logits = student_out["keypoint_logits"]  # [B, 65, H/8, W/8]
 
@@ -52,21 +52,21 @@ class MicroFeatEXCriterion(nn.Module):
 
             # Use the specific SuperPoint distillation loss
             loss, acc = losses.batch_alike_distill_loss(
-                s_logits, teacher_out["heatmap"], grid_size=8
+                s_logits, teacher_out["heatmap"], grid_size=8, debug=debug
             )
 
         elif self.teacher_type == "alike":
             # ALIKE Teacher returns a Heatmap directly
             t_heatmap = teacher_out["heatmap"]
             loss, acc = losses.batch_alike_distill_loss(
-                s_logits, t_heatmap, grid_size=8
+                s_logits, t_heatmap, grid_size=8, debug=debug
             )
         else:
             raise ValueError(f"Unknown teacher type: {self.teacher_type}")
 
         return loss, acc
 
-    def forward(self, student_out, teacher_out, batch_data):
+    def forward(self, student_out, teacher_out, batch_data, step=0):
         """
         Calculates total distillation loss.
         """
@@ -78,9 +78,12 @@ class MicroFeatEXCriterion(nn.Module):
         s_out1, s_out2 = student_out
         t_out1, t_out2 = teacher_out
 
+        # Enable debug every 500 steps
+        debug = (step % 500 == 0 and step > 0)
+
         # 1. Distillation Loss (Heatmap)
-        loss_distill_1, acc_1 = self.compute_distillation(s_out1, t_out1, p1.shape[2:])
-        loss_distill_2, acc_2 = self.compute_distillation(s_out2, t_out2, p2.shape[2:])
+        loss_distill_1, acc_1 = self.compute_distillation(s_out1, t_out1, p1.shape[2:], debug=debug)
+        loss_distill_2, acc_2 = self.compute_distillation(s_out2, t_out2, p2.shape[2:], debug=False)  # Only debug once
 
         loss_heatmap = (loss_distill_1 + loss_distill_2) / 2.0
         acc_heatmap = (acc_1 + acc_2) / 2.0

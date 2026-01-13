@@ -158,36 +158,53 @@ def superpoint_distill_loss(student_heat, teacher_scores, grid_size=8):
 # ============================================================================
 
 
-def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8):
+def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False):
     """
     Distills keypoint positions from teacher heatmap to student's 65-channel logits.
-
-    This loss teaches the student to predict WHICH of the 64 sub-pixel locations
-    within each 8x8 cell contains a keypoint, using the teacher's heatmap as supervision.
+    
+    Uses CONFIDENCE-WEIGHTED cross-entropy to handle class imbalance:
+    - Keypoint cells are weighted by their teacher confidence (stronger keypoints matter more)
+    - Dustbin cells are down-weighted relative to keypoint cells
 
     Args:
         student_logits (torch.Tensor): [65, H/8, W/8] Raw logits from student
-                                        (before softmax and pixel shuffle)
         teacher_heatmap (torch.Tensor): [1, H, W] Teacher's keypoint heatmap at full resolution
         grid_size (int): Pixel shuffle factor (default 8)
+        debug (bool): If True, print diagnostic information
 
     Returns:
         loss (torch.Tensor): Scalar loss value
         accuracy (float): Classification accuracy (0-1)
     """
     C, Hc, Wc = student_logits.shape  # C=65, Hc=H/8, Wc=W/8
+    
+    # FIX: Force teacher heatmap to exact grid-aligned resolution
+    target_H, target_W = Hc * grid_size, Wc * grid_size
+    if teacher_heatmap.shape[-2:] != (target_H, target_W):
+        if debug:
+            print(f"[DEBUG] Resizing teacher heatmap: {teacher_heatmap.shape} -> (1, {target_H}, {target_W})")
+        teacher_heatmap = F.interpolate(
+            teacher_heatmap.unsqueeze(0),
+            size=(target_H, target_W),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+    
     _, H, W = teacher_heatmap.shape
 
     # Downsample teacher heatmap to coarse grid [1, H/8, W/8]
     with torch.no_grad():
-        # Use avg pooling to preserve keypoint strength
-        teacher_coarse = F.avg_pool2d(
+        # Use MAX pooling to get the peak confidence in each cell
+        teacher_coarse = F.max_pool2d(
             teacher_heatmap.unsqueeze(0), kernel_size=grid_size, stride=grid_size
         ).squeeze(0)  # [1, H/8, W/8]
 
-        # Find cells that contain keypoints (threshold)
-        keypoint_mask = teacher_coarse > 0.01  # [1, H/8, W/8]
+        # INCREASED THRESHOLD: Only train on confident keypoint cells
+        keypoint_mask = teacher_coarse > 0.1  # [1, H/8, W/8]
         keypoint_mask = keypoint_mask.squeeze(0)  # [H/8, W/8]
+        
+        # Get confidence values for weighting (squeeze channel dim)
+        confidence = teacher_coarse.squeeze(0)  # [H/8, W/8]
 
     # For each cell with a keypoint, find the peak sub-pixel location
     with torch.no_grad():
@@ -207,30 +224,68 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8):
             peak_positions,
             torch.full_like(peak_positions, 64),  # Dustbin channel
         )  # [H/8, W/8]
+        
+        # Create per-pixel weights
+        # Keypoint cells: weight = confidence (0.1 to 1.0)
+        # Dustbin cells: weight = 0.1 (down-weighted to balance classes)
+        weights = torch.where(
+            keypoint_mask,
+            confidence,  # Use teacher confidence as weight
+            torch.full_like(confidence, 0.1),  # Low weight for dustbin
+        )
+        
+        # Boost keypoint weights to ensure they dominate the loss
+        # This gives keypoints ~10x more importance than dustbin
+        weights = torch.where(
+            keypoint_mask,
+            weights * 10.0,
+            weights,
+        )
 
-    # Compute Cross-Entropy Loss
-    # Reshape logits: [65, H/8, W/8] -> [H/8 * W/8, 65]
+    # Compute WEIGHTED Cross-Entropy Loss
     logits_flat = student_logits.permute(1, 2, 0).reshape(-1, C)
     labels_flat = labels.reshape(-1)
+    weights_flat = weights.reshape(-1)
 
-    # Cross-entropy over 65 classes
-    loss = F.cross_entropy(logits_flat, labels_flat, reduction="mean")
+    # Per-sample cross-entropy (no reduction)
+    loss_per_sample = F.cross_entropy(logits_flat, labels_flat, reduction="none")
+    
+    # Apply weights and average
+    loss = (loss_per_sample * weights_flat).sum() / (weights_flat.sum() + 1e-6)
 
-    # Compute Accuracy (only on keypoint cells)
+    # Compute Accuracy (only on keypoint cells with confidence > 0.1)
     with torch.no_grad():
         predictions = logits_flat.argmax(dim=-1).reshape(Hc, Wc)
 
-        # Accuracy on cells that should have keypoints
         if keypoint_mask.sum() > 0:
             correct = (predictions[keypoint_mask] == labels[keypoint_mask]).float()
             accuracy = correct.mean().item()
         else:
             accuracy = 0.0
+            
+        # DEBUG: Print diagnostic info
+        if debug:
+            num_kpts = keypoint_mask.sum().item()
+            num_dustbin = (labels_flat == 64).sum().item()
+            student_preds = predictions[keypoint_mask] if num_kpts > 0 else torch.tensor([])
+            teacher_labels = labels[keypoint_mask] if num_kpts > 0 else torch.tensor([])
+            
+            print(f"[DEBUG] Shapes: student={student_logits.shape}, teacher={teacher_heatmap.shape}")
+            print(f"[DEBUG] Teacher heatmap: min={teacher_heatmap.min():.4f}, max={teacher_heatmap.max():.4f}")
+            print(f"[DEBUG] Keypoint cells (conf>0.1): {num_kpts} / {Hc * Wc} ({100*num_kpts/(Hc*Wc):.1f}%)")
+            print(f"[DEBUG] Dustbin labels: {num_dustbin} / {Hc * Wc}")
+            print(f"[DEBUG] Weight sum (kpts): {weights[keypoint_mask].sum():.2f}, Weight sum (dustbin): {weights[~keypoint_mask].sum():.2f}")
+            if num_kpts > 0:
+                print(f"[DEBUG] Sample teacher labels (first 10): {teacher_labels[:10].tolist()}")
+                print(f"[DEBUG] Sample student preds (first 10): {student_preds[:10].tolist()}")
+                print(f"[DEBUG] Student predicts dustbin on kpts: {(student_preds == 64).sum().item()} / {num_kpts}")
+            print(f"[DEBUG] Loss={loss.item():.4f}, Acc={accuracy:.4f}")
+            print("-" * 60)
 
     return loss, accuracy
 
 
-def batch_alike_distill_loss(student_logits_batch, teacher_heatmap_batch, grid_size=8):
+def batch_alike_distill_loss(student_logits_batch, teacher_heatmap_batch, grid_size=8, debug=False):
     """
     Batch version of alike_distill_loss.
 
@@ -238,6 +293,7 @@ def batch_alike_distill_loss(student_logits_batch, teacher_heatmap_batch, grid_s
         student_logits_batch (torch.Tensor): [B, 65, H/8, W/8]
         teacher_heatmap_batch (torch.Tensor): [B, 1, H, W]
         grid_size (int): Pixel shuffle factor
+        debug (bool): If True, print diagnostic info for first batch item
 
     Returns:
         loss (torch.Tensor): Scalar loss
@@ -250,9 +306,10 @@ def batch_alike_distill_loss(student_logits_batch, teacher_heatmap_batch, grid_s
     valid_count = 0
 
     for b in range(B):
-        # Process each sample in batch
+        # Process each sample in batch (only debug first item to avoid spam)
         loss, acc = alike_distill_loss(
-            student_logits_batch[b], teacher_heatmap_batch[b], grid_size
+            student_logits_batch[b], teacher_heatmap_batch[b], grid_size, 
+            debug=(debug and b == 0)
         )
 
         # Accumulate loss (even for samples without keypoints to train dustbin)

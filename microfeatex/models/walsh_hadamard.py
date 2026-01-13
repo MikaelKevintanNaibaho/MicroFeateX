@@ -4,6 +4,44 @@ import torch.nn.functional as F
 from scipy.linalg import hadamard
 
 
+class GhostHadamardMixing(nn.Module):
+    """
+    Ghost Module style mixing using Hadamard Transform.
+    
+    Splits the output channels into two parts:
+    1. Primary: Standard 1x1 Conv (Learnable, Heavy) -> Captures complex features
+    2. Secondary: Weighted Hadamard (Learnable, Cheap) -> Generates redundant/frequency features
+    
+    This provides a middle ground between full Conv1x1 and pure WHT.
+    """
+    def __init__(self, in_channels, out_channels, ratio=0.5):
+        super().__init__()
+        self.out_channels = out_channels
+        
+        # Calculate split
+        self.primary_out = int(out_channels * ratio)
+        self.secondary_out = out_channels - self.primary_out
+        
+        # 1. Primary Path (Standard Conv)
+        self.primary = nn.Conv2d(in_channels, self.primary_out, kernel_size=1, bias=False)
+        
+        # 2. Secondary Path (WHT)
+        # Note: We use the existing HadamardMixing class
+        if self.secondary_out > 0:
+            self.secondary = HadamardMixing(in_channels, self.secondary_out, learnable=True)
+        else:
+            self.secondary = None
+            
+    def forward(self, x):
+        out1 = self.primary(x)
+        
+        if self.secondary is not None:
+            out2 = self.secondary(x)
+            return torch.cat([out1, out2], dim=1)
+        
+        return out1
+
+
 class HadamardMixing(nn.Module):
     """
     Weighted Walsh-Hadamard Transform for channel mixing.

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from microfeatex.models.utils import estimate_flops, count_parameters, print_model_stats
 
-from microfeatex.models.walsh_hadamard import HadamardMixing
+from microfeatex.models.walsh_hadamard import HadamardMixing, GhostHadamardMixing
 
 
 def _make_divisible(v, divisor=8, min_value=None):
@@ -41,7 +41,6 @@ class ConvBlock(nn.Module):
         if use_depthwise:
             # Select Pointwise Layer Type
             if use_hadamard:
-                # Fixed Hadamard Transform (No Bias, Non-trainable)
                 pointwise = HadamardMixing(in_c, out_c)
             else:
                 # Standard Learnable 1x1 Conv

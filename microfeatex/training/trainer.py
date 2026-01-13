@@ -247,7 +247,7 @@ class Trainer:
             # Criterion - Heatmap Distillation
             # Passing formatted tuple to criterion
             batch_imgs = (p1, p2, H1, H2)
-            distill_metrics = self.criterion((out1, out2), (t_out1, t_out2), batch_imgs)
+            distill_metrics = self.criterion((out1, out2), (t_out1, t_out2), batch_imgs, step=step)
             loss_sp = distill_metrics["loss_heatmap"]
             acc_sp = distill_metrics["acc_heatmap"]
 
