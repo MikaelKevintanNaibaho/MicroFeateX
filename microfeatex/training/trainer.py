@@ -132,7 +132,7 @@ class Trainer:
             self.dataset,
             batch_size=self.config.get("training", {}).get("batch_size", 8),
             shuffle=True,
-            num_workers=4,
+            num_workers=self.config.get("system", {}).get("num_workers", 4),
             pin_memory=True,
             drop_last=True,
         )
