@@ -33,6 +33,7 @@ class Trainer:
 
         # Setup Paths & Logging
         self.ckpt_dir = self.args.ckpt_save_path
+        os.makedirs(self.ckpt_dir, exist_ok=True)  # Create checkpoint dir if not exists
 
         # Check if user specified 'log_dir' in the YAML config
         paths_conf = self.config.get("paths", {})

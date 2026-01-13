@@ -33,16 +33,17 @@ def load_config(config_path: str) -> Dict[str, Any]:
 def setup_logging_dir(
     base_path: str, model_name: str, is_explicit_log_path: bool = False
 ) -> str:
-    """Creates a unique logging directory."""
-    import time
-
-    timestamp = time.strftime("%Y_%m_%d-%H_%M_%S")
-    run_name = f"{model_name}_{timestamp}"
+    """
+    Creates a logging directory named after the model.
+    
+    Uses just the model_name (no timestamp) so logs persist across training sessions.
+    This means resuming training will continue logging to the same directory.
+    """
     if is_explicit_log_path:
         # User defined a specific "logs" folder in config
-        log_dir = os.path.join(base_path, run_name)
+        log_dir = os.path.join(base_path, model_name)
     else:
         # Default behavior: nest inside "logdir" to avoid cluttering checkpoints
-        log_dir = os.path.join(base_path, "logdir", run_name)
+        log_dir = os.path.join(base_path, "logdir", model_name)
     os.makedirs(log_dir, exist_ok=True)
     return log_dir

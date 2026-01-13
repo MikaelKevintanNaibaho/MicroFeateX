@@ -189,7 +189,7 @@ class HadamardGatedFusion(nn.Module):
         super().__init__()
         
         # 1. Project Local (e.g. 24 -> 64) to match Global
-        self.local_proj = nn.Conv2d(in_local, in_global, 1, bias=False)
+        self.local_proj = HadamardMixing(in_local, in_global, learnable=True, init_scale=1.0)
         self.norm_local = nn.BatchNorm2d(in_global)
         
         # 2. Gating Weight (Learnable per-channel mix)
@@ -332,7 +332,7 @@ if __name__ == "__main__":
         ("Nano-Hadamard (Fixed Mixing)", 0.5, True, True),
     ]
 
-    input_res = (1, 1, 480, 640)
+    input_res = (1, 3, 480, 640)  # Batch=1, Channels=3 (RGB), H=480, W=640
 
     for name, width, dw, hadamard_flag in configs:
         print(f"\n--- Testing Configuration: {name} ---")
