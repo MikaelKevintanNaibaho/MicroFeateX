@@ -68,6 +68,11 @@ class Trainer:
         self.start_step = 0
         self.current_epoch = 0
         self.total_steps = self.config.get("training", {}).get("n_steps", 160000)
+        
+        # Gradient Accumulation
+        self.grad_accum_steps = self.config.get("training", {}).get("gradient_accumulation_steps", 1)
+        if self.grad_accum_steps > 1:
+            print(f"Gradient Accumulation: {self.grad_accum_steps} steps (effective batch = {self.config.get('training', {}).get('batch_size', 8) * self.grad_accum_steps})")
 
         self.hp_scheduler = HyperParamScheduler(self.total_steps)
 
@@ -239,10 +244,10 @@ class Trainer:
             out1 = self.student(p1)
             out2 = self.student(p2)
 
-            # Teacher Forward (No Grad)
+            # Teacher Forward (No Grad) - Let AMP handle precision
             with torch.no_grad():
-                t_out1 = self.teacher(p1.float())
-                t_out2 = self.teacher(p2.float())
+                t_out1 = self.teacher(p1)
+                t_out2 = self.teacher(p2)
 
             # Criterion - Heatmap Distillation
             # Passing formatted tuple to criterion
@@ -435,23 +440,38 @@ class Trainer:
 
         with tqdm.tqdm(total=self.total_steps, initial=self.start_step) as pbar:
             step = self.start_step
+            accum_loss = 0.0
+            accum_metrics = {}
+            
             while step < self.total_steps:
                 self.start_step = step
-                try:
-                    batch = next(iterator)
-                except StopIteration:
-                    self.current_epoch += 1
-                    iterator = iter(self.train_loader)
-                    batch = next(iterator)
-
-                self._update_hyperparameters(step)
-                # Optimization Step
+                
+                # Gradient Accumulation Loop
                 self.optimizer.zero_grad()
+                
+                for accum_step in range(self.grad_accum_steps):
+                    try:
+                        batch = next(iterator)
+                    except StopIteration:
+                        self.current_epoch += 1
+                        iterator = iter(self.train_loader)
+                        batch = next(iterator)
 
-                # UPDATED: Pass 'step' to _train_step
-                loss, metrics, vis_data = self._train_step(batch, step)
+                    self._update_hyperparameters(step)
 
-                self.scaler.scale(loss).backward()
+                    # Forward + Backward (accumulate gradients)
+                    loss, metrics, vis_data = self._train_step(batch, step)
+                    
+                    # Scale loss by accumulation steps for proper averaging
+                    scaled_loss = loss / self.grad_accum_steps
+                    self.scaler.scale(scaled_loss).backward()
+                    
+                    # Accumulate for logging
+                    accum_loss += loss.item() / self.grad_accum_steps
+                    for k, v in metrics.items():
+                        accum_metrics[k] = accum_metrics.get(k, 0) + v / self.grad_accum_steps
+                
+                # Now update weights (after accumulation)
                 self.scaler.unscale_(self.optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.student.parameters(), 1.0
@@ -463,13 +483,17 @@ class Trainer:
                 self.scaler.update()
                 self.scheduler.step()
 
-                # Logging
+                # Logging (use accumulated metrics)
                 if step % 10 == 0:
                     pbar.set_description(
-                        f"Loss: {loss.item():.4f} | Acc: {metrics.get('acc/coarse', 0):.2f}"
+                        f"Loss: {accum_loss:.4f} | Acc: {accum_metrics.get('acc/coarse', 0):.2f}"
                     )
-                    for k, v in metrics.items():
+                    for k, v in accum_metrics.items():
                         self.writer.add_scalar(k, v, step)
+                
+                # Reset accumulation
+                accum_loss = 0.0
+                accum_metrics = {}
 
                 if step % 100 == 0:
                     self.writer.add_scalar(
