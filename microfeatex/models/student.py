@@ -181,7 +181,7 @@ class HadamardGatedFusion(nn.Module):
     """
     Adaptive Fusion Block: Fuses Local (Low-Level) and Global (High-Level) features
     using a learnable channel-wise gating mechanism.
-    
+
     Formula: Out = Gate * Global + (1 - Gate) * Proj(Local)
     """
 
@@ -189,7 +189,9 @@ class HadamardGatedFusion(nn.Module):
         super().__init__()
 
         # 1. Project Local (e.g. 24 -> 64) to match Global
-        self.local_proj = HadamardMixing(in_local, in_global, learnable=True, init_scale=1.0)
+        self.local_proj = HadamardMixing(
+            in_local, in_global, learnable=True, init_scale=1.0
+        )
         self.norm_local = nn.BatchNorm2d(in_global)
 
         # 2. Gating Weight (Learnable per-channel mix)
@@ -198,14 +200,16 @@ class HadamardGatedFusion(nn.Module):
 
         # 3. Output Compression (if needed, usually in_global == out_ch)
         if in_global != out_ch:
-             self.out_conv = nn.Conv2d(in_global, out_ch, 1, bias=False)
+            self.out_conv = nn.Conv2d(in_global, out_ch, 1, bias=False)
         else:
-             self.out_conv = nn.Identity()
+            self.out_conv = nn.Identity()
 
     def forward(self, x_local, x_global):
         # Resize Global to match Local spatial resolution if needed
         if x_global.shape[-2:] != x_local.shape[-2:]:
-            x_global = F.interpolate(x_global, size=x_local.shape[-2:], mode="bilinear", align_corners=False)
+            x_global = F.interpolate(
+                x_global, size=x_local.shape[-2:], mode="bilinear", align_corners=False
+            )
 
         local_feat = self.norm_local(self.local_proj(x_local))
 
@@ -216,6 +220,7 @@ class HadamardGatedFusion(nn.Module):
 
         fused = w * x_global + (1 - w) * local_feat
         return self.out_conv(fused)
+
 
 class EfficientFeatureExtractor(nn.Module):
     def __init__(
@@ -263,7 +268,9 @@ class EfficientFeatureExtractor(nn.Module):
 
         # 3. Reliability Head - Adaptive Gated Fusion
         # Fuses fine_feats (24) and backbone_out (64) -> 32 -> Output
-        self.reliability_gate = HadamardGatedFusion(fine_feats_ch, backbone_out, backbone_out)
+        self.reliability_gate = HadamardGatedFusion(
+            fine_feats_ch, backbone_out, backbone_out
+        )
 
         self.reliability_head = nn.Sequential(
             Block(

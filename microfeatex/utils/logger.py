@@ -5,7 +5,7 @@ Log level can be configured via the MICROFEATEX_LOG_LEVEL environment variable.
 
 Example:
     from microfeatex.utils.logger import get_logger
-    
+
     logger = get_logger(__name__)
     logger.info("Training started")
 """
@@ -27,12 +27,12 @@ _loggers: dict[str, logging.Logger] = {}
 
 def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
     """Get a configured logger instance.
-    
+
     Args:
         name: Logger name, typically __name__ of the calling module.
         level: Optional log level override. If not provided, uses
                MICROFEATEX_LOG_LEVEL env var or defaults to INFO.
-    
+
     Returns:
         Configured logger instance.
     """
@@ -64,12 +64,10 @@ def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
 
 
 def setup_file_logging(
-    logger: logging.Logger,
-    log_file: str,
-    level: int = logging.DEBUG
+    logger: logging.Logger, log_file: str, level: int = logging.DEBUG
 ) -> None:
     """Add file handler to an existing logger.
-    
+
     Args:
         logger: Logger instance to add file handler to.
         log_file: Path to the log file.

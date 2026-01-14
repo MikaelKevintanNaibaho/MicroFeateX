@@ -35,9 +35,13 @@ class TestDualSoftmaxLoss:
         loss, conf = losses.dual_softmax_loss(X, Y)
 
         # With identical descriptors, loss should be relatively low
-        assert loss.item() < 0.5, f"Loss with identical descriptors should be low, got {loss.item()}"
+        assert (
+            loss.item() < 0.5
+        ), f"Loss with identical descriptors should be low, got {loss.item()}"
         # Confidence should be high for all matches
-        assert conf.mean().item() > 0.5, "Confidence should be reasonable for perfect matches"
+        assert (
+            conf.mean().item() > 0.5
+        ), "Confidence should be reasonable for perfect matches"
 
     def test_mismatched_shapes_raises(self, device: str):
         """Test that mismatched shapes raise RuntimeError."""
@@ -105,7 +109,9 @@ class TestKeypointLoss:
 
         loss = losses.keypoint_loss(pred, target)
 
-        assert loss.item() < 3.0, f"Loss should be reasonable for matching predictions, got {loss.item()}"
+        assert (
+            loss.item() < 3.0
+        ), f"Loss should be reasonable for matching predictions, got {loss.item()}"
 
     def test_output_is_scalar(self, device: str):
         """Test that output is a scalar tensor."""

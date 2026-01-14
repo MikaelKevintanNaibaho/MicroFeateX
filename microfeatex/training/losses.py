@@ -165,7 +165,7 @@ def superpoint_distill_loss(student_heat, teacher_scores, grid_size=8):
 def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False):
     """
     Distills keypoint positions from teacher heatmap to student's 65-channel logits.
-    
+
     Uses CONFIDENCE-WEIGHTED cross-entropy to handle class imbalance:
     - Keypoint cells are weighted by their teacher confidence (stronger keypoints matter more)
     - Dustbin cells are down-weighted relative to keypoint cells
@@ -186,7 +186,9 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False
     target_H, target_W = Hc * grid_size, Wc * grid_size
     if teacher_heatmap.shape[-2:] != (target_H, target_W):
         if debug:
-            logger.debug(f"Resizing teacher heatmap: {teacher_heatmap.shape} -> (1, {target_H}, {target_W})")
+            logger.debug(
+                f"Resizing teacher heatmap: {teacher_heatmap.shape} -> (1, {target_H}, {target_W})"
+            )
         teacher_heatmap = F.interpolate(
             teacher_heatmap.unsqueeze(0),
             size=(target_H, target_W),
@@ -270,24 +272,42 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False
         if debug:
             num_kpts = keypoint_mask.sum().item()
             num_dustbin = (labels_flat == 64).sum().item()
-            student_preds = predictions[keypoint_mask] if num_kpts > 0 else torch.tensor([])
+            student_preds = (
+                predictions[keypoint_mask] if num_kpts > 0 else torch.tensor([])
+            )
             teacher_labels = labels[keypoint_mask] if num_kpts > 0 else torch.tensor([])
 
-            logger.debug(f"Shapes: student={student_logits.shape}, teacher={teacher_heatmap.shape}")
-            logger.debug(f"Teacher heatmap: min={teacher_heatmap.min():.4f}, max={teacher_heatmap.max():.4f}")
-            logger.debug(f"Keypoint cells (conf>0.1): {num_kpts} / {Hc * Wc} ({100*num_kpts/(Hc*Wc):.1f}%)")
+            logger.debug(
+                f"Shapes: student={student_logits.shape}, teacher={teacher_heatmap.shape}"
+            )
+            logger.debug(
+                f"Teacher heatmap: min={teacher_heatmap.min():.4f}, max={teacher_heatmap.max():.4f}"
+            )
+            logger.debug(
+                f"Keypoint cells (conf>0.1): {num_kpts} / {Hc * Wc} ({100*num_kpts/(Hc*Wc):.1f}%)"
+            )
             logger.debug(f"Dustbin labels: {num_dustbin} / {Hc * Wc}")
-            logger.debug(f"Weight sum (kpts): {weights[keypoint_mask].sum():.2f}, Weight sum (dustbin): {weights[~keypoint_mask].sum():.2f}")
+            logger.debug(
+                f"Weight sum (kpts): {weights[keypoint_mask].sum():.2f}, Weight sum (dustbin): {weights[~keypoint_mask].sum():.2f}"
+            )
             if num_kpts > 0:
-                logger.debug(f"Sample teacher labels (first 10): {teacher_labels[:10].tolist()}")
-                logger.debug(f"Sample student preds (first 10): {student_preds[:10].tolist()}")
-                logger.debug(f"Student predicts dustbin on kpts: {(student_preds == 64).sum().item()} / {num_kpts}")
+                logger.debug(
+                    f"Sample teacher labels (first 10): {teacher_labels[:10].tolist()}"
+                )
+                logger.debug(
+                    f"Sample student preds (first 10): {student_preds[:10].tolist()}"
+                )
+                logger.debug(
+                    f"Student predicts dustbin on kpts: {(student_preds == 64).sum().item()} / {num_kpts}"
+                )
             logger.debug(f"Loss={loss.item():.4f}, Acc={accuracy:.4f}")
 
     return loss, accuracy
 
 
-def batch_alike_distill_loss(student_logits_batch, teacher_heatmap_batch, grid_size=8, debug=False):
+def batch_alike_distill_loss(
+    student_logits_batch, teacher_heatmap_batch, grid_size=8, debug=False
+):
     """
     Batch version of alike_distill_loss.
 
@@ -310,8 +330,10 @@ def batch_alike_distill_loss(student_logits_batch, teacher_heatmap_batch, grid_s
     for b in range(B):
         # Process each sample in batch (only debug first item to avoid spam)
         loss, acc = alike_distill_loss(
-            student_logits_batch[b], teacher_heatmap_batch[b], grid_size,
-            debug=(debug and b == 0)
+            student_logits_batch[b],
+            teacher_heatmap_batch[b],
+            grid_size,
+            debug=(debug and b == 0),
         )
 
         # Accumulate loss (even for samples without keypoints to train dustbin)

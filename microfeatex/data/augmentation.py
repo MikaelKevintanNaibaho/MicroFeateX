@@ -18,10 +18,11 @@ __all__ = [
 
 class AugmentationResult(NamedTuple):
     """Structured result from AugmentationPipe.forward()."""
-    img1: torch.Tensor      # Source images [B, C, H, W]
-    img2: torch.Tensor      # Warped images [B, C, H, W]
-    H_mat: torch.Tensor     # Homography matrix [B, 3, 3]
-    mask: torch.Tensor      # Valid pixel mask [B, H, W]
+
+    img1: torch.Tensor  # Source images [B, C, H, W]
+    img2: torch.Tensor  # Warped images [B, C, H, W]
+    H_mat: torch.Tensor  # Homography matrix [B, 3, 3]
+    mask: torch.Tensor  # Valid pixel mask [B, H, W]
     coords_map: torch.Tensor  # Dense correspondence map [B, 2, H, W]
 
 

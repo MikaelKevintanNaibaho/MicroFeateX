@@ -35,7 +35,7 @@ def setup_logging_dir(
 ) -> str:
     """
     Creates a logging directory named after the model.
-    
+
     Uses just the model_name (no timestamp) so logs persist across training sessions.
     This means resuming training will continue logging to the same directory.
     """

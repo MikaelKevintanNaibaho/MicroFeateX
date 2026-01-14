@@ -1,6 +1,5 @@
 import sys
 import os
-import torch
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ALIKE_REPO_PATH = os.path.join(CURRENT_DIR, "ALIKE")

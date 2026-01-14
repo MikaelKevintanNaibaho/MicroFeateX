@@ -7,13 +7,14 @@ from scipy.linalg import hadamard
 class GhostHadamardMixing(nn.Module):
     """
     Ghost Module style mixing using Hadamard Transform.
-    
+
     Splits the output channels into two parts:
     1. Primary: Standard 1x1 Conv (Learnable, Heavy) -> Captures complex features
     2. Secondary: Weighted Hadamard (Learnable, Cheap) -> Generates redundant/frequency features
-    
+
     This provides a middle ground between full Conv1x1 and pure WHT.
     """
+
     def __init__(self, in_channels, out_channels, ratio=0.5):
         super().__init__()
         self.out_channels = out_channels
@@ -23,12 +24,16 @@ class GhostHadamardMixing(nn.Module):
         self.secondary_out = out_channels - self.primary_out
 
         # 1. Primary Path (Standard Conv)
-        self.primary = nn.Conv2d(in_channels, self.primary_out, kernel_size=1, bias=False)
+        self.primary = nn.Conv2d(
+            in_channels, self.primary_out, kernel_size=1, bias=False
+        )
 
         # 2. Secondary Path (WHT)
         # Note: We use the existing HadamardMixing class
         if self.secondary_out > 0:
-            self.secondary = HadamardMixing(in_channels, self.secondary_out, learnable=True)
+            self.secondary = HadamardMixing(
+                in_channels, self.secondary_out, learnable=True
+            )
         else:
             self.secondary = None
 
@@ -45,23 +50,23 @@ class GhostHadamardMixing(nn.Module):
 class HadamardMixing(nn.Module):
     """
     Weighted Walsh-Hadamard Transform for channel mixing.
-    
+
     Combines the computational efficiency of fixed Hadamard transforms with
     learnable per-channel scaling weights. This allows the network to learn
     which spectral components (Hadamard basis vectors) are important.
-    
+
     Formula: x_out = (diag(scale) @ H @ x_in) / sqrt(in_channels)
-    
+
     where:
         - H is the fixed Hadamard matrix (orthogonal, values ±1)
         - scale is a learnable per-output-channel weight vector
-        
+
     Benefits over fixed WHT:
         - Learnable importance weighting for each output channel
         - Retains orthogonality structure of Hadamard basis
         - Minimal parameter overhead (only out_channels params)
         - Much better gradient flow vs completely fixed transform
-    
+
     Benefits over 1x1 Conv:
         - Structured transform reduces overfitting risk
         - Fewer parameters (out_channels vs in_channels * out_channels)
@@ -115,7 +120,7 @@ class UnweightedHadamardMixing(nn.Module):
     """
     Original fixed (non-trainable) Walsh-Hadamard Transform.
     Kept for comparison/ablation studies.
-    
+
     x_out = (H @ x_in) / sqrt(in_channels)
     """
 

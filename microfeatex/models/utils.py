@@ -5,6 +5,8 @@ import copy
 from microfeatex.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
 def count_parameters(model):
     """Count trainable parameters."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

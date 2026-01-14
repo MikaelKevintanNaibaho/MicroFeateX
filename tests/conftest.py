@@ -25,7 +25,7 @@ def descriptor_dim() -> int:
 @pytest.fixture
 def sample_descriptors(batch_size: int, descriptor_dim: int, device: str):
     """Generate sample normalized descriptors for testing.
-    
+
     Returns:
         Tuple of (X, Y) matching descriptor pairs of shape [N, D].
     """
@@ -43,7 +43,7 @@ def sample_descriptors(batch_size: int, descriptor_dim: int, device: str):
 @pytest.fixture
 def sample_heatmaps(batch_size: int, device: str):
     """Generate sample heatmaps for testing.
-    
+
     Returns:
         Tuple of (student_logits, teacher_heatmap).
     """
@@ -53,6 +53,8 @@ def sample_heatmaps(batch_size: int, device: str):
     student_logits = torch.randn(batch_size, 65, h, w, device=device)
 
     # Teacher heatmap: [B, 1, H, W] (full resolution)
-    teacher_heatmap = torch.sigmoid(torch.randn(batch_size, 1, h * 8, w * 8, device=device))
+    teacher_heatmap = torch.sigmoid(
+        torch.randn(batch_size, 1, h * 8, w * 8, device=device)
+    )
 
     return student_logits, teacher_heatmap

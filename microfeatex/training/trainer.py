@@ -78,9 +78,13 @@ class Trainer:
         self.total_steps = self.config.get("training", {}).get("n_steps", 160000)
 
         # Gradient Accumulation
-        self.grad_accum_steps = self.config.get("training", {}).get("gradient_accumulation_steps", 1)
+        self.grad_accum_steps = self.config.get("training", {}).get(
+            "gradient_accumulation_steps", 1
+        )
         if self.grad_accum_steps > 1:
-            logger.info(f"Gradient Accumulation: {self.grad_accum_steps} steps (effective batch = {self.config.get('training', {}).get('batch_size', 8) * self.grad_accum_steps})")
+            logger.info(
+                f"Gradient Accumulation: {self.grad_accum_steps} steps (effective batch = {self.config.get('training', {}).get('batch_size', 8) * self.grad_accum_steps})"
+            )
 
         self.hp_scheduler = HyperParamScheduler(self.total_steps)
 
@@ -185,9 +189,7 @@ class Trainer:
         self.optimizer = optim.Adam(self.student.parameters(), lr=lr)
         # --- 1. Warmup Scheduler ---
         warmup = LinearLR(
-            self.optimizer,
-            start_factor=WARMUP_START_FACTOR,
-            total_iters=WARMUP_STEPS
+            self.optimizer, start_factor=WARMUP_START_FACTOR, total_iters=WARMUP_STEPS
         )
 
         # --- 2. Main Scheduler (Step Decay) ---
@@ -199,7 +201,7 @@ class Trainer:
         self.scheduler = SequentialLR(
             self.optimizer,
             schedulers=[warmup, main_scheduler],
-            milestones=[WARMUP_STEPS]
+            milestones=[WARMUP_STEPS],
         )
         self.scaler = GradScaler("cuda")
 
@@ -261,7 +263,9 @@ class Trainer:
             # Criterion - Heatmap Distillation
             # Passing formatted tuple to criterion
             batch_imgs = (p1, p2, H1, H2)
-            distill_metrics = self.criterion((out1, out2), (t_out1, t_out2), batch_imgs, step=step)
+            distill_metrics = self.criterion(
+                (out1, out2), (t_out1, t_out2), batch_imgs, step=step
+            )
             loss_sp = distill_metrics["loss_heatmap"]
             acc_sp = distill_metrics["acc_heatmap"]
 
@@ -443,7 +447,9 @@ class Trainer:
 
     def train(self):
         """Main Training Loop."""
-        logger.info(f"Starting Training: {self.start_step} -> {self.total_steps} steps.")
+        logger.info(
+            f"Starting Training: {self.start_step} -> {self.total_steps} steps."
+        )
 
         iterator = iter(self.train_loader)
 
@@ -478,7 +484,9 @@ class Trainer:
                     # Accumulate for logging
                     accum_loss += loss.item() / self.grad_accum_steps
                     for k, v in metrics.items():
-                        accum_metrics[k] = accum_metrics.get(k, 0) + v / self.grad_accum_steps
+                        accum_metrics[k] = (
+                            accum_metrics.get(k, 0) + v / self.grad_accum_steps
+                        )
 
                 # Now update weights (after accumulation)
                 self.scaler.unscale_(self.optimizer)

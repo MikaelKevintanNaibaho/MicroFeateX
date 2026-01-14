@@ -1,6 +1,6 @@
-
 import numpy as np
 from scipy.linalg import hadamard
+
 
 def check_hadamard_properties(in_c, out_c):
     print(f"\n--- Checking Dimensions: In={in_c}, Out={out_c} ---")
@@ -45,6 +45,7 @@ def check_hadamard_properties(in_c, out_c):
         print("  WARNING: Matrix is Rank Deficient! (Collapse of information)")
     else:
         print("  OK: Matrix is Full Rank.")
+
 
 # Test cases relevant to the model
 # Student model uses widths like 32, 64, 128 (powers of 2) usually,

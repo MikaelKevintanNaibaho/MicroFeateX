@@ -4,6 +4,8 @@ import torch.nn as nn
 from microfeatex.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
 class SuperPointTeacher(nn.Module):
     """
     Wrapper for the standard SuperPoint model to serve as a frozen teacher.

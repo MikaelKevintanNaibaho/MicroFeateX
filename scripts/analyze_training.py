@@ -1,14 +1,15 @@
-
 import os
 import glob
 from tensorboard.backend.event_processing import event_accumulator
 import numpy as np
+
 
 def get_latest_log_dir(log_root):
     dirs = [d for d in glob.glob(os.path.join(log_root, "*")) if os.path.isdir(d)]
     if not dirs:
         return None
     return max(dirs, key=os.path.getmtime)
+
 
 def analyze_logs(log_dir):
     event_files = glob.glob(os.path.join(log_dir, "events.out.tfevents.*"))
@@ -24,11 +25,17 @@ def analyze_logs(log_dir):
     ea = event_accumulator.EventAccumulator(event_file)
     ea.Reload()
 
-    tags = ea.Tags()['scalars']
+    tags = ea.Tags()["scalars"]
 
     metrics_of_interest = [
-        "loss/total", "loss/coarse", "loss/fine", "loss/heatmap",
-        "acc/coarse", "acc/fine", "acc/heatmap", "debug/grad_norm"
+        "loss/total",
+        "loss/coarse",
+        "loss/fine",
+        "loss/heatmap",
+        "acc/coarse",
+        "acc/fine",
+        "acc/heatmap",
+        "debug/grad_norm",
     ]
 
     print("\n--- Current Training State ---")
@@ -45,7 +52,9 @@ def analyze_logs(log_dir):
 
             if len(values) > 0:
                 current = values[-1]
-                avg_last_50 = np.mean(values[-50:]) if len(values) >= 50 else np.mean(values)
+                avg_last_50 = (
+                    np.mean(values[-50:]) if len(values) >= 50 else np.mean(values)
+                )
                 print(f"{tag:<20}: Current={current:.4f} | Avg(50)={avg_last_50:.4f}")
         else:
             print(f"{tag:<20}: Not found")
@@ -65,6 +74,7 @@ def analyze_logs(log_dir):
         print(f"Steps analysed: {steps[-1] if steps else 0}")
 
     print("\n------------------------------")
+
 
 if __name__ == "__main__":
     log_root = "logs"

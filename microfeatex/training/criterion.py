@@ -78,11 +78,15 @@ class MicroFeatEXCriterion(nn.Module):
         t_out1, t_out2 = teacher_out
 
         # Enable debug every 500 steps
-        debug = (step % 500 == 0 and step > 0)
+        debug = step % 500 == 0 and step > 0
 
         # 1. Distillation Loss (Heatmap)
-        loss_distill_1, acc_1 = self.compute_distillation(s_out1, t_out1, p1.shape[2:], debug=debug)
-        loss_distill_2, acc_2 = self.compute_distillation(s_out2, t_out2, p2.shape[2:], debug=False)  # Only debug once
+        loss_distill_1, acc_1 = self.compute_distillation(
+            s_out1, t_out1, p1.shape[2:], debug=debug
+        )
+        loss_distill_2, acc_2 = self.compute_distillation(
+            s_out2, t_out2, p2.shape[2:], debug=False
+        )  # Only debug once
 
         loss_heatmap = (loss_distill_1 + loss_distill_2) / 2.0
         acc_heatmap = (acc_1 + acc_2) / 2.0
