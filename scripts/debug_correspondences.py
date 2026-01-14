@@ -85,9 +85,9 @@ def main():
         ckpt = torch.load(args.ckpt_path, map_location=device)
         # Handle both full training state (with 'model_state') and raw weights
         if "model_state" in ckpt:
-            model.load_state_dict(ckpt["model_state"])
+            model.load_state_dict(ckpt["model_state"], strict=False)
         else:
-            model.load_state_dict(ckpt)
+            model.load_state_dict(ckpt, strict=False)
     except Exception as e:
         print(f"Error loading checkpoint: {e}")
         return
@@ -100,7 +100,7 @@ def main():
     img2_raw = cv2.imread(args.img2)
 
     if img1_raw is None or img2_raw is None:
-        print(f"Error: Could not load images. Check paths.")
+        print("Error: Could not load images. Check paths.")
         return
 
     # Resize for consistency
@@ -110,9 +110,10 @@ def main():
 
     # Convert to Tensor [1, 1, H, W]
     def preprocess(img):
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        t = torch.from_numpy(gray).float() / 255.0
-        return t.unsqueeze(0).unsqueeze(0).to(device)
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        t = torch.from_numpy(rgb).float() / 255.0
+        t = t.permute(2, 0, 1)  # [H, W, C] -> [C, H, W]
+        return t.unsqueeze(0).to(device)
 
     t1 = preprocess(img1)
     t2 = preprocess(img2)

@@ -96,11 +96,11 @@ class Visualizer:
         """
         # Convert to numpy/cv2
         h, w = img1.shape[-2], img1.shape[-1]
-        
+
         # Handle both grayscale [1, 1, H, W] and RGB [1, 3, H, W]
         i1 = img1.squeeze(0).cpu().numpy()  # [C, H, W]
         i2 = img2.squeeze(0).cpu().numpy()  # [C, H, W]
-        
+
         if i1.shape[0] == 3:
             # RGB: [3, H, W] -> [H, W, 3]
             i1 = (np.transpose(i1, (1, 2, 0)) * 255).astype(np.uint8)

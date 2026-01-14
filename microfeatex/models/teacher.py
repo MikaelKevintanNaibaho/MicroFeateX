@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 
+from microfeatex.utils.logger import get_logger
 
+logger = get_logger(__name__)
 class SuperPointTeacher(nn.Module):
     """
     Wrapper for the standard SuperPoint model to serve as a frozen teacher.
@@ -39,10 +41,10 @@ class SuperPointTeacher(nn.Module):
         # Load weights
         try:
             self.load_state_dict(torch.load(weights_path), strict=True)
-            print(f"Loaded Teacher weights from {weights_path}")
+            logger.info(f"Loaded Teacher weights from {weights_path}")
         except FileNotFoundError:
-            print(
-                f"WARNING: Teacher weights not found at {weights_path}. Please download superpoint_v1.pth"
+            logger.warning(
+                f"Teacher weights not found at {weights_path}. Please download superpoint_v1.pth"
             )
 
         self.to(device)

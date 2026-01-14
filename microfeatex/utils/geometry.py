@@ -2,8 +2,15 @@ import torch
 import kornia.geometry.transform as K
 import torch.nn.functional as F
 
+__all__ = [
+    "simple_nms",
+    "scale_homography",
+    "warp_features",
+    "create_valid_mask",
+]
 
-def simple_nms(scores, nms_radius: int):
+
+def simple_nms(scores: torch.Tensor, nms_radius: int) -> torch.Tensor:
     """
     Fast Non-Maximum Suppression using Max Pooling.
 

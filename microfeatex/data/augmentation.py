@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,8 +8,26 @@ import kornia.geometry.transform as G
 import kornia.color
 import numpy as np
 
+__all__ = [
+    "AugmentationPipe",
+    "AugmentationResult",
+    "generate_random_homography",
+    "generate_random_tps",
+]
 
-def generate_random_homography(shape, difficulty=0.3):
+
+class AugmentationResult(NamedTuple):
+    """Structured result from AugmentationPipe.forward()."""
+    img1: torch.Tensor      # Source images [B, C, H, W]
+    img2: torch.Tensor      # Warped images [B, C, H, W]
+    H_mat: torch.Tensor     # Homography matrix [B, 3, 3]
+    mask: torch.Tensor      # Valid pixel mask [B, H, W]
+    coords_map: torch.Tensor  # Dense correspondence map [B, 2, H, W]
+
+
+def generate_random_homography(
+    shape: tuple[int, int], difficulty: float = 0.3
+) -> np.ndarray:
     """
     Generates a random homography matrix with controlled difficulty.
     Logic adapted from XFeat (CVPR 2024).
@@ -54,7 +74,12 @@ def generate_random_homography(shape, difficulty=0.3):
     return H
 
 
-def generate_random_tps(shape, grid=(8, 6), difficulty=0.3, prob=0.5):
+def generate_random_tps(
+    shape: tuple[int, int],
+    grid: tuple[int, int] = (8, 6),
+    difficulty: float = 0.3,
+    prob: float = 0.5,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Generates parameters for Thin Plate Spline (TPS) warping.
     """
@@ -148,7 +173,7 @@ class AugmentationPipe(nn.Module):
             )
 
     @torch.no_grad()
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> AugmentationResult:
         """
         Args:
             x: [B, C, H, W] Input images (normalized 0-1)
@@ -276,9 +301,9 @@ class AugmentationPipe(nn.Module):
                 img1 = kornia.color.rgb_to_grayscale(img1)
                 img2 = kornia.color.rgb_to_grayscale(img2)
 
-        return img1, img2, H_mat, mask, coords_map
+        return AugmentationResult(img1, img2, H_mat, mask, coords_map)
 
-    def warp_points(self, H, pts):
+    def warp_points(self, H: torch.Tensor, pts: torch.Tensor) -> torch.Tensor:
         """
         Maps keypoints from the Source image frame to the Target image frame.
         Accounts for: Scale -> Crop -> Homography -> Crop -> Scale.

@@ -25,14 +25,14 @@ def analyze_logs(log_dir):
     ea.Reload()
 
     tags = ea.Tags()['scalars']
-    
+
     metrics_of_interest = [
         "loss/total", "loss/coarse", "loss/fine", "loss/heatmap",
         "acc/coarse", "acc/fine", "acc/heatmap", "debug/grad_norm"
     ]
 
     print("\n--- Current Training State ---")
-    
+
     # Store data for trend analysis
     data = {}
 
@@ -42,7 +42,7 @@ def analyze_logs(log_dir):
             steps = [e.step for e in events]
             values = [e.value for e in events]
             data[tag] = (steps, values)
-            
+
             if len(values) > 0:
                 current = values[-1]
                 avg_last_50 = np.mean(values[-50:]) if len(values) >= 50 else np.mean(values)
@@ -59,11 +59,11 @@ def analyze_logs(log_dir):
             diff = last_50 - first_50
             trend = "Decreasing" if diff < 0 else "Increasing"
             print(f"\nLoss Trend (last 100 steps): {trend} ({diff:.4f})")
-        
+
     if "acc/coarse" in data:
         steps, values = data["acc/coarse"]
         print(f"Steps analysed: {steps[-1] if steps else 0}")
-    
+
     print("\n------------------------------")
 
 if __name__ == "__main__":
@@ -71,7 +71,7 @@ if __name__ == "__main__":
     if not os.path.exists(log_root):
         # try parent directory just in case
         log_root = "../logs"
-    
+
     if os.path.exists(log_root):
         latest_dir = get_latest_log_dir(log_root)
         if latest_dir:

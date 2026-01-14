@@ -1,5 +1,4 @@
 import os
-import time
 import tqdm
 import torch
 import torch.optim as optim
@@ -7,19 +6,27 @@ from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 
 from torch.amp import autocast, GradScaler
-from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 
 from microfeatex.models.student import EfficientFeatureExtractor
 from microfeatex.models.alike_teacher import AlikeTeacher
 from microfeatex.models.teacher import SuperPointTeacher
 from microfeatex.data.augmentation import AugmentationPipe
-from microfeatex.data.dataset import Dataset
+from microfeatex.data.dataset import ImageDataset
 from microfeatex.utils.visualization import Visualizer
 from microfeatex.utils.config import load_config, setup_logging_dir, seed_everything
 from microfeatex.training.criterion import MicroFeatEXCriterion
 from microfeatex.training.scheduler import HyperParamScheduler
 from microfeatex.training import utils, losses
+from microfeatex.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# Scheduler Constants
+WARMUP_START_FACTOR: float = 0.1
+WARMUP_STEPS: int = 5000
+LR_DECAY_STEP: int = 30000
+LR_DECAY_GAMMA: float = 0.5
 
 
 class Trainer:
@@ -41,7 +48,7 @@ class Trainer:
 
         if yaml_log_dir:
             # Case 1: Use the specific log path from config (e.g., "logs/")
-            print(f"Using defined log directory: {yaml_log_dir}")
+            logger.info(f"Using defined log directory: {yaml_log_dir}")
             self.log_dir = setup_logging_dir(
                 yaml_log_dir, self.args.model_name, is_explicit_log_path=True
             )
@@ -55,7 +62,7 @@ class Trainer:
 
         self.vis = Visualizer(log_dir=self.log_dir, colormap_name=cmap_name)
         self.writer = self.vis.writer
-        print(f"Artifacts will be saved to: {self.log_dir}")
+        logger.info(f"Artifacts will be saved to: {self.log_dir}")
 
         # Components
         self._build_data()
@@ -69,11 +76,11 @@ class Trainer:
         self.start_step = 0
         self.current_epoch = 0
         self.total_steps = self.config.get("training", {}).get("n_steps", 160000)
-        
+
         # Gradient Accumulation
         self.grad_accum_steps = self.config.get("training", {}).get("gradient_accumulation_steps", 1)
         if self.grad_accum_steps > 1:
-            print(f"Gradient Accumulation: {self.grad_accum_steps} steps (effective batch = {self.config.get('training', {}).get('batch_size', 8) * self.grad_accum_steps})")
+            logger.info(f"Gradient Accumulation: {self.grad_accum_steps} steps (effective batch = {self.config.get('training', {}).get('batch_size', 8) * self.grad_accum_steps})")
 
         self.hp_scheduler = HyperParamScheduler(self.total_steps)
 
@@ -127,8 +134,8 @@ class Trainer:
             "dataset_root", paths_conf.get("coco_root", self.args.dataset_root)
         )
 
-        print(f"Loading Dataset from: {root}")
-        self.dataset = Dataset(root, self.config)
+        logger.info(f"Loading Dataset from: {root}")
+        self.dataset = ImageDataset(root, self.config)
         self.train_loader = DataLoader(
             self.dataset,
             batch_size=self.config.get("training", {}).get("batch_size", 8),
@@ -177,21 +184,22 @@ class Trainer:
 
         self.optimizer = optim.Adam(self.student.parameters(), lr=lr)
         # --- 1. Warmup Scheduler ---
-        # Linearly increases LR from (lr * 0.1) to (lr) over the first 5000 steps
-        warmup = LinearLR(self.optimizer, start_factor=0.1, total_iters=5000)
+        warmup = LinearLR(
+            self.optimizer,
+            start_factor=WARMUP_START_FACTOR,
+            total_iters=WARMUP_STEPS
+        )
 
         # --- 2. Main Scheduler (Step Decay) ---
-        # Decays LR by 0.5 every 30,000 steps
-        # Note: This takes over AFTER step 5000.
         main_scheduler = optim.lr_scheduler.StepLR(
-            self.optimizer, step_size=30000, gamma=0.5
+            self.optimizer, step_size=LR_DECAY_STEP, gamma=LR_DECAY_GAMMA
         )
 
         # --- 3. Sequential Combination ---
-        # Steps 0 -> 5000: Use Warmup
-        # Steps 5000+: Use Main Scheduler
         self.scheduler = SequentialLR(
-            self.optimizer, schedulers=[warmup, main_scheduler], milestones=[5000]
+            self.optimizer,
+            schedulers=[warmup, main_scheduler],
+            milestones=[WARMUP_STEPS]
         )
         self.scaler = GradScaler("cuda")
 
@@ -215,7 +223,7 @@ class Trainer:
     def _load_checkpoint(self):
         ckpt_path = os.path.join(self.ckpt_dir, "last.pth")
         if os.path.exists(ckpt_path):
-            print(f"Resuming from {ckpt_path}")
+            logger.info(f"Resuming from {ckpt_path}")
             ckpt = torch.load(ckpt_path, map_location=self.device)
             self.student.load_state_dict(ckpt["model_state"])
             self.optimizer.load_state_dict(ckpt["optimizer_state"])
@@ -435,7 +443,7 @@ class Trainer:
 
     def train(self):
         """Main Training Loop."""
-        print(f"Starting Training: {self.start_step} -> {self.total_steps} steps.")
+        logger.info(f"Starting Training: {self.start_step} -> {self.total_steps} steps.")
 
         iterator = iter(self.train_loader)
 
@@ -443,13 +451,13 @@ class Trainer:
             step = self.start_step
             accum_loss = 0.0
             accum_metrics = {}
-            
+
             while step < self.total_steps:
                 self.start_step = step
-                
+
                 # Gradient Accumulation Loop
                 self.optimizer.zero_grad()
-                
+
                 for accum_step in range(self.grad_accum_steps):
                     try:
                         batch = next(iterator)
@@ -462,16 +470,16 @@ class Trainer:
 
                     # Forward + Backward (accumulate gradients)
                     loss, metrics, vis_data = self._train_step(batch, step)
-                    
+
                     # Scale loss by accumulation steps for proper averaging
                     scaled_loss = loss / self.grad_accum_steps
                     self.scaler.scale(scaled_loss).backward()
-                    
+
                     # Accumulate for logging
                     accum_loss += loss.item() / self.grad_accum_steps
                     for k, v in metrics.items():
                         accum_metrics[k] = accum_metrics.get(k, 0) + v / self.grad_accum_steps
-                
+
                 # Now update weights (after accumulation)
                 self.scaler.unscale_(self.optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -491,7 +499,7 @@ class Trainer:
                     )
                     for k, v in accum_metrics.items():
                         self.writer.add_scalar(k, v, step)
-                
+
                 # Reset accumulation
                 accum_loss = 0.0
                 accum_metrics = {}

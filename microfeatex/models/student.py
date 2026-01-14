@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from microfeatex.models.utils import estimate_flops, count_parameters, print_model_stats
+from microfeatex.models.utils import print_model_stats
 
-from microfeatex.models.walsh_hadamard import HadamardMixing, GhostHadamardMixing
+from microfeatex.models.walsh_hadamard import HadamardMixing
 
 
 def _make_divisible(v, divisor=8, min_value=None):
@@ -187,15 +187,15 @@ class HadamardGatedFusion(nn.Module):
 
     def __init__(self, in_local, in_global, out_ch):
         super().__init__()
-        
+
         # 1. Project Local (e.g. 24 -> 64) to match Global
         self.local_proj = HadamardMixing(in_local, in_global, learnable=True, init_scale=1.0)
         self.norm_local = nn.BatchNorm2d(in_global)
-        
+
         # 2. Gating Weight (Learnable per-channel mix)
         # Initialize to 0.5 (equal mix)
         self.gate = nn.Parameter(torch.ones(1, in_global, 1, 1) * 0.5)
-        
+
         # 3. Output Compression (if needed, usually in_global == out_ch)
         if in_global != out_ch:
              self.out_conv = nn.Conv2d(in_global, out_ch, 1, bias=False)
@@ -206,14 +206,14 @@ class HadamardGatedFusion(nn.Module):
         # Resize Global to match Local spatial resolution if needed
         if x_global.shape[-2:] != x_local.shape[-2:]:
             x_global = F.interpolate(x_global, size=x_local.shape[-2:], mode="bilinear", align_corners=False)
-            
+
         local_feat = self.norm_local(self.local_proj(x_local))
-        
+
         # Learnable Soft-Gating
         # 0.0 -> Use Local Only
         # 1.0 -> Use Global Only
         w = torch.sigmoid(self.gate)
-        
+
         fused = w * x_global + (1 - w) * local_feat
         return self.out_conv(fused)
 
@@ -264,7 +264,7 @@ class EfficientFeatureExtractor(nn.Module):
         # 3. Reliability Head - Adaptive Gated Fusion
         # Fuses fine_feats (24) and backbone_out (64) -> 32 -> Output
         self.reliability_gate = HadamardGatedFusion(fine_feats_ch, backbone_out, backbone_out)
-        
+
         self.reliability_head = nn.Sequential(
             Block(
                 backbone_out,
@@ -303,7 +303,7 @@ class EfficientFeatureExtractor(nn.Module):
         # Note: "features_fused" is usually conceptually "Global" here relative to f8
         rel_feat = self.reliability_gate(features_f8, features_fused)
         reliability = torch.sigmoid(self.reliability_head(rel_feat))
-        
+
         offsets = torch.tanh(self.offset_head(features_f8)) * 0.5
 
         return {

@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 import copy
 
+from microfeatex.utils.logger import get_logger
 
+logger = get_logger(__name__)
 def count_parameters(model):
     """Count trainable parameters."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -28,7 +30,7 @@ def estimate_flops(model, input_size=(1, 1, 480, 640)):
     except ImportError:
         pass
     except Exception as e:
-        print(f"Warning: thop failed ({e}). Falling back to hooks.")
+        logger.warning(f"thop failed ({e}). Falling back to hooks.")
 
     total_flops = 0
 
@@ -65,10 +67,10 @@ def print_model_stats(model, name="Model", input_size=(1, 1, 480, 640)):
     params = count_parameters(model)
     flops = estimate_flops(model, input_size)
 
-    print(f"\n📊 {name} Stats:")
-    print(f"   • Resolution: {input_size[2]}x{input_size[3]}")
-    print(f"   • Parameters: {params / 1e6:.2f} M")
-    print(f"   • FLOPs:      {flops:.3f} G")
+    logger.info(f"\n📊 {name} Stats:")
+    logger.info(f"   • Resolution: {input_size[2]}x{input_size[3]}")
+    logger.info(f"   • Parameters: {params / 1e6:.2f} M")
+    logger.info(f"   • FLOPs:      {flops:.3f} G")
 
     pi4_fps = 15.0 / flops if flops > 0 else 0
-    print(f"   • Est. FPS (Pi4): ~{int(pi4_fps)}")
+    logger.info(f"   • Est. FPS (Pi4): ~{int(pi4_fps)}")

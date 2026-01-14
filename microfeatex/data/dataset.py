@@ -1,12 +1,18 @@
 import glob
 import os
+
 import cv2
 import torch
-import numpy as np
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset as TorchDataset
+
+from microfeatex.utils.logger import get_logger
+
+__all__ = ["ImageDataset"]
+
+logger = get_logger(__name__)
 
 
-class Dataset(Dataset):
+class ImageDataset(TorchDataset):
     def __init__(self, root_dir, config):
         """
         Initializes the dataset by recursively searching for images in root_dir.
@@ -36,7 +42,7 @@ class Dataset(Dataset):
                 f"No images found in {root_dir}. Please check the 'coco_root' path in your config."
             )
 
-        print(f"Dataset: Found {len(self.files)} images in {root_dir}")
+        logger.info(f"Dataset: Found {len(self.files)} images in {root_dir}")
 
         # Get Resize Shape from Config
         self.resize_shape = tuple(config["augmentation"]["warp_resolution"])  # (W, H)
@@ -52,10 +58,10 @@ class Dataset(Dataset):
 
         if img is None:
             # Handle corrupted images or read errors gracefully
-            print(f"Warning: Could not read image: {path}. Skipping.")
+            logger.warning(f"Could not read image: {path}. Skipping.")
             # Recursively try the next image (wrapping around)
             return self.__getitem__((idx + 1) % len(self))
-        
+
         # Convert BGR -> RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
