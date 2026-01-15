@@ -19,6 +19,13 @@ from microfeatex.training.criterion import MicroFeatEXCriterion
 from microfeatex.training.scheduler import HyperParamScheduler
 from microfeatex.training import utils, losses
 from microfeatex.training.constants import MIN_CORRESPONDENCES, MIN_VALID_POINTS
+from microfeatex.training.callbacks import (
+    CallbackHandler,
+    LoggingCallback,
+    VisualizationCallback,
+    GradientMonitorCallback,
+    EvaluationCallback,
+)
 from microfeatex.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -63,6 +70,29 @@ class Trainer:
 
         self.vis = Visualizer(log_dir=self.log_dir, colormap_name=cmap_name)
         self.writer = self.vis.writer
+
+        # --- Callbacks Setup ---
+        self.callbacks = CallbackHandler()
+
+        # Std callbacks
+        self.callbacks.add_callback(LoggingCallback())
+        self.callbacks.add_callback(VisualizationCallback())
+        self.callbacks.add_callback(GradientMonitorCallback())
+
+        # Evaluation callback (if enabled in config)
+        eval_conf = self.config.get("evaluation", {})
+        if eval_conf.get("enabled", False):
+            self.callbacks.add_callback(
+                EvaluationCallback(
+                    image_dir=eval_conf.get("image_dir", "dataset/megadepth_test_1500"),
+                    json_path=eval_conf.get("json_path", "assets/megadepth_1500.json"),
+                    eval_interval=eval_conf.get("interval", 50000),
+                    num_pairs=eval_conf.get("num_pairs", 100),
+                    top_k=eval_conf.get("top_k", 2000),
+                )
+            )
+            logger.info("Evaluation callback enabled.")
+
         logger.info(f"Artifacts will be saved to: {self.log_dir}")
 
         # Components
@@ -554,6 +584,7 @@ class Trainer:
                 # Checkpointing
                 if (step + 1) % self.args.save_ckpt_every == 0:
                     self._save_checkpoint(step)
+                    self.callbacks.on_checkpoint(self, step)
 
                 step += 1
                 pbar.update(1)
