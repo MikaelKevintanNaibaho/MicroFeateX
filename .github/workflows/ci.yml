@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install pytest kornia scipy thop opencv-python-headless matplotlib
+          pip install pytest kornia scipy thop opencv-python-headless matplotlib hypothesis
       
       - name: Run tests
         run: pytest tests/ -v --tb=short
