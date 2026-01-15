@@ -1,0 +1,9 @@
+Running on cuda
+Testing with DOT Image (should see some keypoints)
+Initializing alike-t on cuda...
+Student Logits: torch.Size([1, 65, 60, 80])
+Teacher Map: torch.Size([1, 1, 480, 640]) (Range: 0.000 - 0.997)
+Teacher Coarse Stats: min=0.0001, max=0.9967, mean=0.0097
+Keypoint Mask Ratio: 0.0142
+Valid Keypoint Cells: 68
+Saved debug_targets.png

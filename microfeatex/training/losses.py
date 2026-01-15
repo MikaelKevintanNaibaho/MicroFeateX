@@ -208,6 +208,14 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False
         keypoint_mask = teacher_coarse > 0.1  # [1, H/8, W/8]
         keypoint_mask = keypoint_mask.squeeze(0)  # [H/8, W/8]
 
+        # FIX: Mask out 1-cell border (8px) to remove edge artifacts
+        border_mask = torch.ones_like(keypoint_mask, dtype=torch.bool)
+        border_mask[0, :] = False
+        border_mask[-1, :] = False
+        border_mask[:, 0] = False
+        border_mask[:, -1] = False
+        keypoint_mask = keypoint_mask & border_mask
+
         # Get confidence values for weighting (squeeze channel dim)
         confidence = teacher_coarse.squeeze(0)  # [H/8, W/8]
 
@@ -240,10 +248,10 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False
         )
 
         # Boost keypoint weights to ensure they dominate the loss
-        # This gives keypoints ~10x more importance than dustbin
+        # This gives keypoints ~50x more importance than dustbin (Moderate Balance)
         weights = torch.where(
             keypoint_mask,
-            weights * 10.0,
+            weights * 50.0,
             weights,
         )
 
@@ -284,7 +292,7 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False
                 f"Teacher heatmap: min={teacher_heatmap.min():.4f}, max={teacher_heatmap.max():.4f}"
             )
             logger.debug(
-                f"Keypoint cells (conf>0.1): {num_kpts} / {Hc * Wc} ({100*num_kpts/(Hc*Wc):.1f}%)"
+                f"Keypoint cells (conf>0.1): {num_kpts} / {Hc * Wc} ({100 * num_kpts / (Hc * Wc):.1f}%)"
             )
             logger.debug(f"Dustbin labels: {num_dustbin} / {Hc * Wc}")
             logger.debug(

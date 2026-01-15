@@ -74,5 +74,21 @@ def print_model_stats(model, name="Model", input_size=(1, 1, 480, 640)):
     logger.info(f"   • Parameters: {params / 1e6:.2f} M")
     logger.info(f"   • FLOPs:      {flops:.3f} G")
 
-    pi4_fps = 15.0 / flops if flops > 0 else 0
-    logger.info(f"   • Est. FPS (Pi4): ~{int(pi4_fps)}")
+    # Theoretical Peak for RPi 5 (Quad A76 @ 2.4GHz) is approx ~45-50 GFLOPS.
+    # However, practical "Empirical" capacity for FP32 inference is often lower.
+    # RPi 4 was set to ~15. RPi 5 is roughly 2.5x-3x faster.
+    rpi5_capacity = 45.0
+
+    # Efficiency factor: PyTorch/ONNX rarely hits 100% compute utilization on CPU
+    # especially for lightweight models (often memory bound).
+    efficiency = 0.8  # Optimistic estimate for optimized runtime (ONNX/NCNN)
+
+    theo_fps = rpi5_capacity / flops if flops > 0 else 0
+    real_fps = theo_fps * efficiency
+
+    logger.info(
+        f"   • Est. FPS (Pi5): ~{int(real_fps)} - {int(theo_fps)} (Theoretical)"
+    )
+    logger.info(
+        f"     (Note: This is a theoretical upper bound based on {rpi5_capacity} GFLOPS capacity)"
+    )
