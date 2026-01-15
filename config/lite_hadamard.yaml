@@ -55,3 +55,12 @@ augmentation:
   use_tps: true                
   tps_prob: 0.5                
   difficulty: 0.3
+
+# Evaluation during training
+evaluation:
+  enabled: true
+  interval: 50000  # Evaluate every 50k steps
+  image_dir: "dataset/megadepth_test_1500"
+  json_path: "assets/megadepth_1500.json"
+  num_pairs: 100  # Subset for speed
+  top_k: 2000

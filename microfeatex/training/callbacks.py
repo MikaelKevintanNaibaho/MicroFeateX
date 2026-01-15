@@ -176,6 +176,76 @@ class GradientMonitorCallback(TrainerCallback):
                 )
 
 
+class EvaluationCallback(TrainerCallback):
+    """Runs MegaDepth evaluation at checkpoint intervals.
+
+    Logs AUC@5°, AUC@10°, AUC@20° to TensorBoard.
+    """
+
+    def __init__(
+        self,
+        image_dir: str = "dataset/megadepth_test_1500",
+        json_path: str = "assets/megadepth_1500.json",
+        eval_interval: int = 50000,
+        num_pairs: int = 100,
+        top_k: int = 2000,
+    ):
+        """Initialize evaluation callback.
+
+        Args:
+            image_dir: Path to MegaDepth images (containing Undistorted_SfM/).
+            json_path: Path to megadepth_1500.json metadata.
+            eval_interval: Steps between evaluations.
+            num_pairs: Number of pairs to evaluate (subset for speed).
+            top_k: Maximum keypoints per image.
+        """
+        self.image_dir = image_dir
+        self.json_path = json_path
+        self.eval_interval = eval_interval
+        self.num_pairs = num_pairs
+        self.top_k = top_k
+        self._last_eval_step = -1
+
+    def on_checkpoint(self, trainer: Trainer, step: int) -> None:
+        """Run evaluation when checkpoint is saved."""
+        if step <= self._last_eval_step:
+            return
+
+        if step % self.eval_interval != 0:
+            return
+
+        self._last_eval_step = step
+
+        # Import here to avoid circular dependency
+        from microfeatex.training.evaluation import run_evaluation
+        from microfeatex.utils.logger import get_logger
+
+        logger = get_logger(__name__)
+        logger.info(f"Running MegaDepth evaluation at step {step}...")
+
+        try:
+            aucs = run_evaluation(
+                model=trainer.student,
+                image_dir=self.image_dir,
+                json_path=self.json_path,
+                device=str(trainer.device),
+                num_pairs=self.num_pairs,
+                top_k=self.top_k,
+            )
+
+            # Log to TensorBoard
+            for key, value in aucs.items():
+                trainer.writer.add_scalar(f"eval/{key}", value, step)
+
+            logger.info(
+                f"Eval results: AUC@5={aucs['AUC@5']:.3f}, "
+                f"AUC@10={aucs['AUC@10']:.3f}, AUC@20={aucs['AUC@20']:.3f}"
+            )
+
+        except Exception as e:
+            logger.warning(f"Evaluation failed at step {step}: {e}")
+
+
 class CallbackHandler:
     """Manages multiple callbacks.
 
