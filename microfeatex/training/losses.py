@@ -2,11 +2,21 @@
 microfeatex/training/losses.py - Complete Loss Functions
 """
 
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
 from . import utils
+from .constants import (
+    FOCAL_ALPHA,
+    FOCAL_BETA,
+    FOCAL_POSITIVE_THRESHOLD,
+    KEYPOINT_CONFIDENCE_THRESHOLD,
+    KEYPOINT_WEIGHT_MULTIPLIER,
+)
 
 from microfeatex.utils.logger import get_logger
+from microfeatex.exceptions import LossValidationError
 
 logger = get_logger(__name__)
 
@@ -17,12 +27,22 @@ except ImportError:
     extract_alike_kpts = None
 
 
-def dual_softmax_loss(X, Y, temp=0.2):
+def dual_softmax_loss(
+    X: torch.Tensor, Y: torch.Tensor, temp: float = 0.2
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Dual Softmax loss for descriptor matching.
+
+    Args:
+        X: Descriptors from view 1, shape [N, D].
+        Y: Descriptors from view 2, shape [N, D].
+        temp: Softmax temperature (lower = sharper).
+
+    Returns:
+        Tuple of (loss, confidence) where confidence is [N].
     """
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
-        raise RuntimeError("Error: X and Y shapes must match and be 2D matrices")
+        raise LossValidationError("X and Y shapes must match and be 2D matrices")
 
     dist_mat = (X @ Y.t()) / temp
     conf_matrix12 = F.log_softmax(dist_mat, dim=1)
@@ -40,8 +60,23 @@ def dual_softmax_loss(X, Y, temp=0.2):
     return loss, conf
 
 
-def smooth_l1_loss(input, target, beta=2.0, size_average=True):
-    """Smooth L1 loss."""
+def smooth_l1_loss(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    beta: float = 2.0,
+    size_average: bool = True,
+) -> torch.Tensor:
+    """Smooth L1 loss with configurable beta threshold.
+
+    Args:
+        input: Predicted values.
+        target: Target values.
+        beta: Threshold for smooth transition.
+        size_average: If True, return mean; otherwise sum.
+
+    Returns:
+        Scalar loss tensor.
+    """
     diff = torch.abs(input - target)
     loss = torch.where(diff < beta, 0.5 * diff**2 / beta, diff - 0.5 * beta)
     return loss.mean() if size_average else loss.sum()
@@ -90,13 +125,18 @@ def fine_loss(f1, f2, pts1, pts2, fine_module, ws=7):
     return error
 
 
-def heatmap_mse_loss(student_heat, teacher_heat):
+def heatmap_mse_loss(
+    student_heat: torch.Tensor, teacher_heat: torch.Tensor
+) -> torch.Tensor:
     """
     Computes MSE loss between the student's predicted heatmap and the teacher's target heatmap.
 
     Args:
-        student_heat (torch.Tensor): [B, 1, H, W], range [0, 1]
-        teacher_heat (torch.Tensor): [B, 1, H, W], range [0, 1]
+        student_heat: Student heatmap [B, 1, H, W], range [0, 1].
+        teacher_heat: Teacher heatmap [B, 1, H, W], range [0, 1].
+
+    Returns:
+        Scalar MSE loss.
     """
     if student_heat.shape != teacher_heat.shape:
         teacher_heat = F.interpolate(
@@ -109,17 +149,21 @@ def heatmap_mse_loss(student_heat, teacher_heat):
     return F.mse_loss(student_heat, teacher_heat)
 
 
-def superpoint_distill_loss(student_heat, teacher_scores, grid_size=8):
+def superpoint_distill_loss(
+    student_heat: torch.Tensor,
+    teacher_scores: torch.Tensor,
+    grid_size: int = 8,
+) -> torch.Tensor:
     """
     Distills the heatmap from the SuperPoint teacher to the student using Focal Loss.
 
     Args:
-        student_heat (torch.Tensor): [B, 1, H, W] Student predicted heatmap (probabilities).
-        teacher_scores (torch.Tensor): [B, 65, H/8, W/8] Teacher raw logits.
-        grid_size (int): Pixel shuffle factor (default 8).
+        student_heat: Student predicted heatmap [B, 1, H, W] (probabilities).
+        teacher_scores: Teacher raw logits [B, 65, H/8, W/8].
+        grid_size: Pixel shuffle factor (default 8).
 
     Returns:
-        torch.Tensor: Scalar loss value.
+        Scalar loss value.
     """
     # 1. Process Teacher Output to Heatmap
     with torch.no_grad():
@@ -134,12 +178,12 @@ def superpoint_distill_loss(student_heat, teacher_scores, grid_size=8):
     # Clamp for numerical stability
     pred = torch.clamp(student_heat, min=1e-6, max=1.0 - 1e-6)
 
-    # Focal Loss Weights
-    alpha = 2.0
-    beta = 4.0
+    # Focal Loss Weights (from constants)
+    alpha = FOCAL_ALPHA
+    beta = FOCAL_BETA
 
     # Define positive/negative regions based on teacher
-    pos_inds = t_heat.gt(0.01).float()
+    pos_inds = t_heat.gt(FOCAL_POSITIVE_THRESHOLD).float()
     neg_inds = 1.0 - pos_inds
 
     # Loss Calculation
@@ -162,7 +206,12 @@ def superpoint_distill_loss(student_heat, teacher_scores, grid_size=8):
 # ============================================================================
 
 
-def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False):
+def alike_distill_loss(
+    student_logits: torch.Tensor,
+    teacher_heatmap: torch.Tensor,
+    grid_size: int = 8,
+    debug: bool = False,
+) -> tuple[torch.Tensor, float]:
     """
     Distills keypoint positions from teacher heatmap to student's 65-channel logits.
 
@@ -171,14 +220,13 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False
     - Dustbin cells are down-weighted relative to keypoint cells
 
     Args:
-        student_logits (torch.Tensor): [65, H/8, W/8] Raw logits from student
-        teacher_heatmap (torch.Tensor): [1, H, W] Teacher's keypoint heatmap at full resolution
-        grid_size (int): Pixel shuffle factor (default 8)
-        debug (bool): If True, print diagnostic information
+        student_logits: Raw logits from student [65, H/8, W/8].
+        teacher_heatmap: Teacher's keypoint heatmap at full resolution [1, H, W].
+        grid_size: Pixel shuffle factor (default 8).
+        debug: If True, print diagnostic information.
 
     Returns:
-        loss (torch.Tensor): Scalar loss value
-        accuracy (float): Classification accuracy (0-1)
+        Tuple of (loss, accuracy) where accuracy is 0-1.
     """
     C, Hc, Wc = student_logits.shape  # C=65, Hc=H/8, Wc=W/8
 
@@ -204,8 +252,8 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False
             teacher_heatmap.unsqueeze(0), kernel_size=grid_size, stride=grid_size
         ).squeeze(0)  # [1, H/8, W/8]
 
-        # INCREASED THRESHOLD: Only train on confident keypoint cells
-        keypoint_mask = teacher_coarse > 0.1  # [1, H/8, W/8]
+        # Only train on confident keypoint cells (threshold from constants)
+        keypoint_mask = teacher_coarse > KEYPOINT_CONFIDENCE_THRESHOLD  # [1, H/8, W/8]
         keypoint_mask = keypoint_mask.squeeze(0)  # [H/8, W/8]
 
         # FIX: Mask out 1-cell border (8px) to remove edge artifacts
@@ -248,10 +296,10 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False
         )
 
         # Boost keypoint weights to ensure they dominate the loss
-        # This gives keypoints ~50x more importance than dustbin (Moderate Balance)
+        # Weight multiplier from constants for easy tuning
         weights = torch.where(
             keypoint_mask,
-            weights * 50.0,
+            weights * KEYPOINT_WEIGHT_MULTIPLIER,
             weights,
         )
 
@@ -314,20 +362,22 @@ def alike_distill_loss(student_logits, teacher_heatmap, grid_size=8, debug=False
 
 
 def batch_alike_distill_loss(
-    student_logits_batch, teacher_heatmap_batch, grid_size=8, debug=False
-):
+    student_logits_batch: torch.Tensor,
+    teacher_heatmap_batch: torch.Tensor,
+    grid_size: int = 8,
+    debug: bool = False,
+) -> tuple[torch.Tensor, float]:
     """
     Batch version of alike_distill_loss.
 
     Args:
-        student_logits_batch (torch.Tensor): [B, 65, H/8, W/8]
-        teacher_heatmap_batch (torch.Tensor): [B, 1, H, W]
-        grid_size (int): Pixel shuffle factor
-        debug (bool): If True, print diagnostic info for first batch item
+        student_logits_batch: Student logits [B, 65, H/8, W/8].
+        teacher_heatmap_batch: Teacher heatmaps [B, 1, H, W].
+        grid_size: Pixel shuffle factor.
+        debug: If True, print diagnostic info for first batch item.
 
     Returns:
-        loss (torch.Tensor): Scalar loss
-        accuracy (float): Average accuracy across batch
+        Tuple of (loss, accuracy) averaged across batch.
     """
     B = student_logits_batch.shape[0]
 
@@ -402,14 +452,18 @@ def hybrid_heatmap_loss(
     return total_loss, metrics
 
 
-def superpoint_focal_loss_internal(student_heat, teacher_heat, grid_size=8):
+def superpoint_focal_loss_internal(
+    student_heat: torch.Tensor,
+    teacher_heat: torch.Tensor,
+    grid_size: int = 8,
+) -> torch.Tensor:
     """Internal focal loss helper."""
     pred = torch.clamp(student_heat, min=1e-6, max=1.0 - 1e-6)
 
-    alpha = 2.0
-    beta = 4.0
+    alpha = FOCAL_ALPHA
+    beta = FOCAL_BETA
 
-    pos_inds = teacher_heat.gt(0.01).float()
+    pos_inds = teacher_heat.gt(FOCAL_POSITIVE_THRESHOLD).float()
     neg_inds = 1.0 - pos_inds
 
     pos_loss = pos_inds * torch.pow(1 - pred, alpha) * torch.log(pred)
@@ -534,16 +588,18 @@ def coordinate_classification_loss(coords1, pts1, pts2, conf):
     return loss * 2.0, acc
 
 
-def keypoint_loss(reliability_pred, confidence_target):
+def keypoint_loss(
+    reliability_pred: torch.Tensor, confidence_target: torch.Tensor
+) -> torch.Tensor:
     """
     Improved reliability loss using Binary Cross Entropy.
 
     Args:
-        reliability_pred (torch.Tensor): [N] Predicted reliability scores (0-1, from sigmoid)
-        confidence_target (torch.Tensor): [N] Target confidence scores (0-1, from dual_softmax)
+        reliability_pred: Predicted reliability scores [N] (0-1, from sigmoid).
+        confidence_target: Target confidence scores [N] (0-1, from dual_softmax).
 
     Returns:
-        torch.Tensor: Scalar loss value
+        Scalar loss value.
     """
     eps = 1e-6
     reliability_pred = torch.clamp(reliability_pred, eps, 1.0 - eps)
@@ -558,8 +614,19 @@ def keypoint_loss(reliability_pred, confidence_target):
     return bce_loss * 3.0
 
 
-def hard_triplet_loss(X, Y, margin=0.5):
-    """Hard triplet loss for descriptor learning."""
+def hard_triplet_loss(
+    X: torch.Tensor, Y: torch.Tensor, margin: float = 0.5
+) -> torch.Tensor:
+    """Hard triplet loss for descriptor learning.
+
+    Args:
+        X: Descriptors from view 1 [N, D].
+        Y: Descriptors from view 2 [N, D].
+        margin: Triplet loss margin.
+
+    Returns:
+        Scalar loss value.
+    """
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
         raise RuntimeError("Error: X and Y shapes must match and be 2D matrices")
 

@@ -38,3 +38,6 @@ debug_*.png
 !assets/*.jpg
 !assets/*.jpeg
 .cache/
+
+# --- Agent Config (local only) ---
+.agent/

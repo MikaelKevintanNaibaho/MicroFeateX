@@ -44,11 +44,13 @@ class TestDualSoftmaxLoss:
         ), "Confidence should be reasonable for perfect matches"
 
     def test_mismatched_shapes_raises(self, device: str):
-        """Test that mismatched shapes raise RuntimeError."""
+        """Test that mismatched shapes raise LossValidationError."""
+        from microfeatex.exceptions import LossValidationError
+
         X = torch.randn(10, 64, device=device)
         Y = torch.randn(8, 64, device=device)  # Different N
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(LossValidationError):
             losses.dual_softmax_loss(X, Y)
 
 

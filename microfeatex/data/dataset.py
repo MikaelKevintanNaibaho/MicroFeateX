@@ -5,6 +5,7 @@ import cv2
 import torch
 from torch.utils.data import Dataset as TorchDataset
 
+from microfeatex.exceptions import DatasetError
 from microfeatex.utils.logger import get_logger
 
 __all__ = ["ImageDataset"]
@@ -38,7 +39,7 @@ class ImageDataset(TorchDataset):
         self.files = sorted(list(set(self.files)))
 
         if not self.files:
-            raise ValueError(
+            raise DatasetError(
                 f"No images found in {root_dir}. Please check the 'coco_root' path in your config."
             )
 
@@ -50,17 +51,35 @@ class ImageDataset(TorchDataset):
     def __len__(self):
         return len(self.files)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int, _retry_count: int = 0) -> torch.Tensor:
+        """Load and preprocess an image.
+
+        Args:
+            idx: Index of the image to load.
+            _retry_count: Internal counter for retry attempts (do not set manually).
+
+        Returns:
+            Preprocessed image tensor of shape [3, H, W].
+
+        Raises:
+            RuntimeError: If too many consecutive images fail to load.
+        """
         path = self.files[idx]
 
         # Load as RGB (OpenCV loads as BGR, so we convert)
         img = cv2.imread(path, cv2.IMREAD_COLOR)
 
         if img is None:
-            # Handle corrupted images or read errors gracefully
-            logger.warning(f"Could not read image: {path}. Skipping.")
-            # Recursively try the next image (wrapping around)
-            return self.__getitem__((idx + 1) % len(self))
+            # Prevent infinite recursion with retry limit
+            if _retry_count >= 10:
+                raise DatasetError(
+                    f"Too many consecutive failed image reads (10+) starting at index {idx}. "
+                    f"Last failed path: {path}"
+                )
+            logger.warning(
+                f"Could not read image: {path}. Skipping (retry {_retry_count + 1}/10)."
+            )
+            return self.__getitem__((idx + 1) % len(self), _retry_count + 1)
 
         # Convert BGR -> RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

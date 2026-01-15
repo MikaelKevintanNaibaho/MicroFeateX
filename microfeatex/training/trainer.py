@@ -18,6 +18,7 @@ from microfeatex.utils.config import load_config, setup_logging_dir, seed_everyt
 from microfeatex.training.criterion import MicroFeatEXCriterion
 from microfeatex.training.scheduler import HyperParamScheduler
 from microfeatex.training import utils, losses
+from microfeatex.training.constants import MIN_CORRESPONDENCES, MIN_VALID_POINTS
 from microfeatex.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -323,7 +324,7 @@ class Trainer:
             valid_batches = 0
 
             for b in range(len(positives)):
-                if len(positives[b]) < 10:
+                if len(positives[b]) < MIN_CORRESPONDENCES:
                     continue
 
                 # Unpack Student Outputs
@@ -366,7 +367,9 @@ class Trainer:
                 # ----------------------------------------------------------------
 
                 # If too few points remain, skip descriptor loss for this batch item
-                if valid_mask.sum() < 8:  # Minimum points to form a batch
+                if (
+                    valid_mask.sum() < MIN_VALID_POINTS
+                ):  # Minimum points to form a batch
                     # Only accumulate reliability loss
                     batch_stats["loss_kp"].append(l_kp)
                     # Add dummy zeros for others to avoid statistics errors or handle gracefully
@@ -493,6 +496,19 @@ class Trainer:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.student.parameters(), 1.0
                 )
+
+                # NaN/Inf gradient detection - skip update if gradients are bad
+                if not torch.isfinite(grad_norm):
+                    logger.warning(
+                        f"Step {step}: Non-finite gradients detected (grad_norm={grad_norm}), "
+                        "skipping optimizer step"
+                    )
+                    self.optimizer.zero_grad()
+                    self.scaler.update()
+                    step += 1
+                    pbar.update(1)
+                    continue
+
                 if step % 100 == 0:
                     self.writer.add_scalar("debug/grad_norm", grad_norm, step)
 
