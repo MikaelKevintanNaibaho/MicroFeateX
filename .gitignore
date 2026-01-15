@@ -37,3 +37,4 @@ debug_*.png
 !assets/*.png
 !assets/*.jpg
 !assets/*.jpeg
+.cache/
