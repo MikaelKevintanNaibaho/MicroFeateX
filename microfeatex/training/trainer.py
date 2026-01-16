@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from microfeatex.models.student import EfficientFeatureExtractor
 from microfeatex.models.alike_teacher import AlikeTeacher
 from microfeatex.models.teacher import SuperPointTeacher
+from microfeatex.models.walsh_hadamard import HadamardMixing
 from microfeatex.data.augmentation import AugmentationPipe
 from microfeatex.data.dataset import ImageDataset
 from microfeatex.utils.visualization import Visualizer
@@ -453,8 +454,23 @@ class Trainer:
                 # Total Loss (Sum of weighted)
                 total_loss = w_ds + w_kp + w_sp + w_fine
 
+                # --- Regularization for HadamardMixing (Prevent Drift) ---
+                reg_loss = 0.0
+                for m in self.student.modules():
+                    if isinstance(m, HadamardMixing) and m.learnable:
+                        # Penalize deviation from 1.0 (assuming init_scale=1.0)
+                        # This prevents the scale from drifting to Infinity due to BN redundancy
+                        reg_loss += (m.scale - 1.0).pow(2).sum()
+
+                # Weighting: Small enough not to hurt learning, big enough to prevent explosion
+                w_reg = reg_loss * 0.01
+                total_loss += w_reg
+
                 metrics = {
                     "loss/total": total_loss.item(),
+                    "loss/reg": reg_loss.item()
+                    if isinstance(reg_loss, torch.Tensor)
+                    else 0.0,
                     "loss/coarse": l_ds.item(),
                     "loss/fine": l_fine.item(),
                     "loss/heatmap": loss_sp.item(),
